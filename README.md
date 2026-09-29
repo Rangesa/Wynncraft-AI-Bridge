@@ -1,8 +1,8 @@
-# Wynn AI Bridge 0.5.10 — Minecraft 26.2 / Fabric / MCP + Wynncraft Knowledge Index
+# Wynn AI Bridge 0.6.1 — Minecraft 26.2 / Fabric / MCP + Wynncraft Knowledge Index
 
 Minecraft/Wynncraft の状態を **画像OCRではなくクライアント内部のテキストと状態から** AIへ渡すクライアントModです。Wynncraftの会話やtooltip、Ability Treeの表示を日本語化する機能も備えています。
 
-v0.5.10 は、ゲーム状態の取得、Wynncraft公式データ検索、MCP/REST接続、表示翻訳をまとめた版です。Wynncraft独自glyphや数値を保護し、通常のplayer chatは既定でAIへ渡しません。
+v0.6.1 は、v0.6.0の読み取り機能と限定UI操作を維持し、認識済みBank Page 2から空のplayer inventory slotへ単一アイテムをwithdrawする操作を追加した版です。Bank操作にはMinecraft内で件数を明示したlocal armが必要です。Wynncraft独自glyphや数値を保護し、通常のplayer chatは既定でAIへ渡しません。UI操作は既定で無効です。
 
 これにより、AIは「今見えているアイテム」を読むだけでなく、**そのアイテムの公式データ、セット、場所、入手/使い道/強化/商人/クエスト情報を自分で索引・検索**できます。
 
@@ -222,7 +222,7 @@ http://127.0.0.1:8765/mcp
 {
   "ok": true,
   "name": "wynn-ai-bridge",
-  "version": "0.5.10",
+  "version": "0.6.1",
   "mcp": {
     "path": "/mcp",
     "protocols": ["2026-07-28", "2025-11-25"]
@@ -248,6 +248,16 @@ http://127.0.0.1:8765/mcp
 - Wynncraft knowledge: `wynn_inspect_hovered_item`, `wynn_knowledge_search`, `wynn_search_items`, `wynn_get_item`, `wynn_search_locations`, `wynn_search_wiki`, `wynn_get_wiki_page`, `wynn_index_status`
 
 `allowActions=true` にすると、認証付きの `minecraft_send_command` と `minecraft_send_chat` も追加されます。
+
+`allowUiActions=false` が既定値です。`allowUiActions=true` にすると、読み取り専用のruntime診断tool 1個と、別の安全ゲートを使うwrite tool 4個が追加され、tools/listは合計20個になります。`allowActions`、Bearer token、command/chatの認証条件は変更しません。
+
+- `minecraft_click_gui_slot`: fresh readのscreen class / syncId / stateRevision / item名が一致した場合だけ、自分のバニラinventory画面にあるitem slotを1回クリック
+- `minecraft_move_inventory_item`: 自分のmain inventory/hotbar間でstack全体を移動。移動先は空、または同じitem/componentsでstack全体が収まる場合だけ許可
+- `minecraft_withdraw_bank_item`: 認識済みWynncraft Bank Page 2のcontent slot 0–44から、count 1のアイテムを空のplayer inventory slotへ1個withdraw。Page 2のscreen/menu/syncId/revisionとBankのページ操作ラベルを実行直前に照合し、サーバー同期後に両slotを検証。1回のlocal armで最大7回まで
+- `minecraft_equip_item`: `helmet` / `chestplate` / `leggings` / `boots` の空いているvanilla装備slotへ、Minecraftの`Equippable` componentが一致するitemを移動。装備済みitemの置換とWynncraft独自のアクセサリ/装備GUIは対象外
+- `wynn_get_ability_tree`: 現在のscreen、container、描画ItemStack、捕捉済みテキストを推測なしで返すruntime調査tool。Ability Treeのnode状態やpoint数は判別せず、クリックもしません
+
+この実装は、任意のHandledScreenへの汎用write APIを公開しません。Bank withdrawは、`ContainerScreen` + `ChestMenu` + 90 slotsに加えて、`Quick Actions` / `Storage Type` / `Page 1 <<<<<` / `Page 3 >>>>>` が既知slotにあるPage 2だけを認識します。Bank content slot 0–44からcount 1の1アイテムを、空のplayer inventory slotへ標準pickup click 2回で移動し、Bankの他ページ、deposit、merchant、trade、bulk stack、shift-clickは拒否します。通常のslot clickとinventory moveは引き続き自分のvanilla inventoryに限定します。drop / throw / destroy / sell / buy / trade確定 / arbitrary inputは公開しません。
 
 ### `minecraft_get_context`
 
@@ -352,6 +362,20 @@ WynncraftのNPC dialogue、Tracked Quest、GUI/HUD等のpre-render textを取得
 
 ゲーム内状態を変更するため、`allowActions=true` のときだけ `tools/list` に出ます。Bearer tokenも必要です。
 
+### 限定UI操作のlocal arm
+
+MCPからarmするtoolはありません。UI操作を有効にするには、設定の `allowUiActions=true` に加え、Minecraft内で次の**client-only command**を実行します。これはserver commandとして送信されません。
+
+```text
+/wynnbridge actions arm
+/wynnbridge actions arm bank 7
+/wynnbridge actions disarm
+```
+
+起動時は必ずdisarmedです。通常の`arm`は最大 `uiActions.maxArmSeconds` 秒（既定300秒）UI操作を許可しますが、Bank withdraw allowanceは0です。Bankからの取り出しを使う場合だけ、Minecraft内で`arm bank <1-7>`を実行して許可件数を明示します。各成功または試行で1枠を消費し、最大7個まで、1 actionにつきcount 1のアイテム1個です。この枠はメモリ上だけに保持し、disarm、timeout、disconnect、world changeで消去します。操作は1件ずつ処理し、各actionの開始間隔は750ms以上、同じJSON-RPC request idは再利用できません。操作前に画面・syncId・revision・slot内容を再取得し、サーバー同期後に両slotを確認します。確認できない場合は`verified=false`を返し、成功扱いにしません。
+
+公開MCPが認証なしでも、disarmed状態でのwrite callは `UI actions are not locally armed` で拒否します。`allowActions=true` とtokenが設定されている場合は、従来どおり `/mcp` 全体にBearer認証が必要です。
+
 ## ChatGPTへつなぐ: Tailscale Funnel
 
 BridgeはIPv4 loopbackの `127.0.0.1` だけで待ち受けます。デフォルトportは `8765` で、Minecraft Fabric clientが起動している間だけMCP serviceが応答します。Tailscale Funnelには `/mcp` mountだけを作り、rootや他のpathは設定しません。
@@ -363,9 +387,25 @@ ChatGPT
   -> http://127.0.0.1:<BRIDGE_PORT>/mcp
 ```
 
+現在のproduction path（2026-09-29時点）は次のとおりです。
+
+```text
+ChatGPT
+  -> https://wynn-bridge.tail0243b7.ts.net/mcp
+  -> Tailscale Funnel on WSL (/mcp)
+  -> WSL 127.0.0.1:18766
+  -> Windows 172.18.96.1:18765
+  -> Windows portproxy
+  -> Wynn AI Bridge 127.0.0.1:8765
+```
+
+`172.18.96.1` とrelay portはこのPCのWSL/Windowsネットワークに固有で、環境により変わります。Bridge sourceへ固定値を入れず、既存のrelay・portproxy・Firewall・Funnel設定を変更しないでください。
+
 Tailscaleの `--set-path=/mcp` はmount prefixをproxy時に取り除くため、targetにも `/mcp` を付けます。これで公開URLの `/mcp` がBridgeの `/mcp` に届きます。`/`、`/health`、`/test`、`/v1/*` はmountされず、Bridgeへ転送されません。Bridge自体もLAN/WAN interfaceにはbindしません。Tailscaleは公開URLのHost headerをoriginへ渡すため、セットアップ後にゲームの `wynn-ai-bridge.properties` へ `tailscaleHost=<node>.<tailnet>.ts.net` を設定します。8443または10000を使う場合は `:<port>` も含めます。
 
-### Windows 11でのセットアップ
+### Direct Windows Funnelのセットアップ例
+
+以下はWindowsでBridgeへ直接forwardする構成例です。上記の現行WSL production pathには適用しません。
 
 1. Tailscale Windows clientを起動し、ChromeのTailscale管理画面と同じ、使用するtailnetのアカウントにサインインします。Windows serviceはPC起動時に自動起動します。
 2. [Tailscale Admin Console](https://login.tailscale.com/admin) のDNS設定でMagicDNSとHTTPS certificatesが有効であることを確認します。Funnelの初回有効化では、TailscaleがHTTPS certificateを用意しtailnet policyへFunnel node attributeを追加します。既定の対象は `autogroup:member`（tailnet内の全member）なので、policyの対象範囲を確認してから承認してください。
@@ -393,7 +433,7 @@ tailscale funnel status --json
 
 公開するのはTailscaleのHTTPS `443` 上の `/mcp` routeだけです。Funnelのcatch-allは作らず、未一致routeはTailscaleから404を返します。FunnelのHTTPS証明書は公開Certificate Transparency logにDNS名が記録されるため、node名に個人情報を含めないでください。
 
-Bridgeの既定設定は `allowActions=false` です。read-only MCP接続ではtoken不要です。`allowActions=true` にすると `/mcp` にもBearer tokenが必要になりますが、Funnel設定ではAuthorization headerを追加しないため、Actionsは無効のままにしてください。
+Bridgeの既定設定は `allowActions=false`、`allowUiActions=false` です。read-only MCP接続ではtoken不要です。`allowActions=true` にすると `/mcp` にもBearer tokenが必要になります。既存の認証なしconnectorではcommand/chat actionsを有効にしないでください。限定UI操作は別のlocal arm gateで制御されます。
 
 ChatGPTに登録するURLはTailscaleから表示される次のURLです。
 
@@ -416,6 +456,8 @@ port=8765
 tailscaleHost=
 allowActions=false
 token=
+allowUiActions=false
+uiActions.maxArmSeconds=300
 knowledge.enabled=true
 knowledge.wikiEnabled=true
 knowledge.refreshMinutes=60
@@ -434,6 +476,8 @@ tokenが設定されている場合、RESTだけでなく `/mcp` にも以下が
 ```text
 Authorization: Bearer <token>
 ```
+
+`uiActions.armed` のような永続設定はありません。arm状態はMinecraft process内だけに保持され、プロパティファイルへ保存されません。
 
 ## Browser / CSRF / DNS rebinding対策
 
@@ -498,12 +542,12 @@ Minecraft 26.2の開発環境はJava 25です。
 gradle build
 ```
 
-`build` は `check` を実行し、Ability Tree翻訳の回帰チェックも含みます。生成されたJARを使用するFabric 26.2 profileの `mods` フォルダへ配置してください。
+`build` は `check` を実行し、既存Ability Tree regressionとUI action security regressionも含みます。生成されたJARを使用するFabric 26.2 profileの `mods` フォルダへ配置してください。
 
 生成物:
 
 ```text
-build/libs/wynn-ai-bridge-0.5.10.jar
+build/libs/wynn-ai-bridge-0.6.1.jar
 ```
 
 JARのversionは `gradle.properties` の `mod_version` から決まります。

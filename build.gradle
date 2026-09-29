@@ -27,6 +27,11 @@ sourceSets {
         compileClasspath += sourceSets.client.output + sourceSets.client.compileClasspath
         runtimeClasspath += sourceSets.client.output + sourceSets.client.runtimeClasspath
     }
+    uiActionRegression {
+        java.srcDir "src/uiActionRegression/java"
+        compileClasspath += sourceSets.client.output + sourceSets.client.compileClasspath
+        runtimeClasspath += sourceSets.client.output + sourceSets.client.runtimeClasspath
+    }
 }
 
 repositories {
@@ -72,8 +77,15 @@ tasks.register("abilityTreeRegression", JavaExec) {
     mainClass = "dev.tanaka.wynnaibridge.translation.AbilityTreeRegressionHarness"
 }
 
+tasks.register("uiActionRegression", JavaExec) {
+    dependsOn tasks.named("uiActionRegressionClasses")
+    classpath = sourceSets.uiActionRegression.runtimeClasspath
+    mainClass = "dev.tanaka.wynnaibridge.http.UiActionRegressionHarness"
+}
+
 tasks.named("check") {
     dependsOn tasks.named("abilityTreeRegression")
+    dependsOn tasks.named("uiActionRegression")
 }
 
 jar {

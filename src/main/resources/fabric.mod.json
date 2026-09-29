@@ -3,7 +3,7 @@
   "id": "wynn_ai_bridge",
   "version": "${version}",
   "name": "Wynn AI Bridge",
-  "description": "Client-side Minecraft/Wynncraft AI bridge with live non-OCR game-state capture, embedded MCP, and a read-only Wynncraft API/wiki knowledge index.",
+  "description": "Client-side Minecraft/Wynncraft AI bridge with live non-OCR state capture, embedded MCP, Wynncraft knowledge, and locally armed inventory actions.",
   "authors": ["Tanaka + OpenAI"],
   "contact": {},
   "license": "MIT",

@@ -1,6 +1,7 @@
 package dev.tanaka.wynnaibridge.state;
 
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.item.ItemStack;
 
@@ -20,6 +21,15 @@ public final class PlayerInventoryCollector {
         }
 
         var inventory = minecraft.player.getInventory();
+        long stateRevision = UiStateRevisionTracker.INSTANCE.refresh(minecraft);
+        var currentScreen = minecraft.gui.screen();
+        String screenClass = currentScreen == null ? null : currentScreen.getClass().getName();
+        Integer containerSyncId = currentScreen instanceof AbstractContainerScreen<?> containerScreen
+            ? containerScreen.getMenu().containerId
+            : null;
+        String screenTitle = currentScreen instanceof AbstractContainerScreen<?> containerScreen
+            ? containerScreen.getTitle().getString()
+            : null;
         var items = inventory.getNonEquipmentItems();
         int selected = inventory.getSelectedSlot();
         List<InventorySlot> inventorySlots = new ArrayList<>();
@@ -49,6 +59,11 @@ public final class PlayerInventoryCollector {
             true,
             "",
             System.currentTimeMillis(),
+            stateRevision,
+            stateRevision,
+            screenClass,
+            containerSyncId,
+            screenTitle,
             selected,
             List.copyOf(inventorySlots),
             List.copyOf(equipment)
@@ -62,12 +77,18 @@ public final class PlayerInventoryCollector {
         boolean ok,
         String error,
         long capturedAt,
+        long screenRevision,
+        long stateRevision,
+        String screenClass,
+        Integer containerSyncId,
+        String screenTitle,
         Integer selectedHotbarSlot,
         List<InventorySlot> inventory,
         List<EquipmentItem> equipment
     ) {
         static Result error(String error) {
-            return new Result(false, error, System.currentTimeMillis(), null, List.of(), List.of());
+            return new Result(false, error, System.currentTimeMillis(), 0L, 0L, null, null, null, null,
+                List.of(), List.of());
         }
     }
 }

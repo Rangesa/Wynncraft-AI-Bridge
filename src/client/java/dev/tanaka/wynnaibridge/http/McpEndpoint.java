@@ -11,6 +11,10 @@ import dev.tanaka.wynnaibridge.state.TooltipCollector;
 import dev.tanaka.wynnaibridge.state.OpenContainerCollector;
 import dev.tanaka.wynnaibridge.state.PlayerInventoryCollector;
 import dev.tanaka.wynnaibridge.state.VisibleUiCollector;
+import dev.tanaka.wynnaibridge.state.AbilityTreeDebugCollector;
+import dev.tanaka.wynnaibridge.ui.UiActionGate;
+import dev.tanaka.wynnaibridge.ui.UiActionService;
+import dev.tanaka.wynnaibridge.ui.BankWithdrawService;
 import net.minecraft.client.Minecraft;
 
 import java.io.IOException;
@@ -24,9 +28,12 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Embedded MCP Streamable HTTP endpoint.
@@ -147,7 +154,7 @@ public final class McpEndpoint {
         );
     }
 
-    private Map<String, Object> listToolsResult(boolean modern) {
+    Map<String, Object> listToolsResult(boolean modern) {
         List<Map<String, Object>> tools = new ArrayList<>();
         tools.add(tool(
             "minecraft_get_state",
@@ -331,6 +338,86 @@ public final class McpEndpoint {
             ));
         }
 
+        if (config.allowUiActions()) {
+            tools.add(tool(
+                "wynn_get_ability_tree",
+                "Read-only runtime diagnostics for the visible screen/menu, open slots, rendered item stacks, hovered slot tooltip when available, and captured GUI text. It reports raw evidence and does not infer unlocked/prerequisite/point states or perform clicks.",
+                objectSchema(linked(
+                    "maxAgeMs", integerProperty("Maximum age of captured screen evidence in milliseconds.", 1L, 10_000L),
+                    "itemLimit", integerProperty("Maximum rendered item records.", 1L, 500L),
+                    "textLimit", integerProperty("Maximum captured text records.", 1L, 1000L)
+                )),
+                true,
+                false
+            ));
+            tools.add(tool(
+                "minecraft_click_gui_slot",
+                "Perform one left/right pickup click on a populated slot in the vanilla player inventory screen. Requires the exact screen class, sync id, state revision, and item name from a fresh read. Arbitrary GUI screens and non-player slots are refused.",
+                requiredObjectSchema(List.of("slot", "button", "expectedItemName", "expectedScreen", "expectedSyncId", "expectedRevision"), linked(
+                    "slot", integerProperty("Current menu slot index from minecraft_get_open_container.", 0L, 1000L),
+                    "button", enumStringProperty("Minecraft pickup button.", List.of("left", "right")),
+                    "expectedItemName", stringProperty("Exact item display name currently in the slot."),
+                    "expectedScreen", stringProperty("Exact screenClass from the current read."),
+                    "expectedSyncId", integerProperty("containerId from the current read.", 0L, 100000L),
+                    "expectedRevision", integerProperty("stateRevision from the current read.", 0L, Long.MAX_VALUE)
+                )),
+                false,
+                true,
+                false,
+                false
+            ));
+            tools.add(tool(
+                "minecraft_move_inventory_item",
+                "Move one entire stack between two slots in the vanilla player inventory. The destination must be empty or have enough room for the exact same item/components; swaps and partial merges are refused. Reads and verifies server-synchronized inventory state between the two standard pickup clicks.",
+                requiredObjectSchema(List.of("fromSlot", "toSlot", "expectedItemName", "expectedScreen", "expectedSyncId", "expectedRevision"), linked(
+                    "fromSlot", integerProperty("Player inventory index from 0 through 35.", 0L, 35L),
+                    "toSlot", integerProperty("Player inventory index from 0 through 35.", 0L, 35L),
+                    "expectedItemName", stringProperty("Exact item display name currently in fromSlot."),
+                    "expectedScreen", stringProperty("Exact screenClass from minecraft_get_inventory."),
+                    "expectedSyncId", integerProperty("containerSyncId from minecraft_get_inventory.", 0L, 100000L),
+                    "expectedRevision", integerProperty("stateRevision from minecraft_get_inventory.", 0L, Long.MAX_VALUE)
+                )),
+                false,
+                false,
+                false,
+                false
+            ));
+            tools.add(tool(
+                "minecraft_withdraw_bank_item",
+                "Withdraw one single-count item from the recognized Wynncraft Bank page 2 into one empty player inventory slot. Only Bank menu slots 0-44 are eligible; page controls, stacks, deposits, merchants, trades, and other container screens are refused. A local arm must explicitly authorize 1-7 withdrawals.",
+                requiredObjectSchema(List.of("bankSlot", "inventorySlot", "expectedItemId", "expectedItemName", "expectedBankPage", "expectedScreen", "expectedSyncId", "expectedRevision"), linked(
+                    "bankSlot", integerProperty("Bank content menu slot from minecraft_get_open_container; only 0 through 44.", 0L, 44L),
+                    "inventorySlot", integerProperty("Empty player inventory index from 0 through 35.", 0L, 35L),
+                    "expectedItemId", stringProperty("Exact itemId from the current Bank slot."),
+                    "expectedItemName", stringProperty("Exact item display name from the current Bank slot."),
+                    "expectedBankPage", integerProperty("The supported Wynncraft Bank page; this tool currently accepts page 2 only.", 2L, 2L),
+                    "expectedScreen", stringProperty("Exact screenClass from minecraft_get_open_container."),
+                    "expectedSyncId", integerProperty("containerId from minecraft_get_open_container.", 1L, 100000L),
+                    "expectedRevision", integerProperty("stateRevision from minecraft_get_open_container.", 0L, Long.MAX_VALUE)
+                )),
+                false,
+                false,
+                false,
+                false
+            ));
+            tools.add(tool(
+                "minecraft_equip_item",
+                "Equip one item from the local player inventory into an empty vanilla helmet, chestplate, leggings, or boots slot. The item's Equippable component must match the requested target. Replacing equipped items and Wynncraft accessory/custom equipment slots are not supported.",
+                requiredObjectSchema(List.of("inventorySlot", "expectedItemName", "target", "expectedScreen", "expectedSyncId", "expectedRevision"), linked(
+                    "inventorySlot", integerProperty("Player inventory index from 0 through 35.", 0L, 35L),
+                    "expectedItemName", stringProperty("Exact item display name currently in inventorySlot."),
+                    "target", enumStringProperty("Vanilla armor slot.", List.of("helmet", "chestplate", "leggings", "boots")),
+                    "expectedScreen", stringProperty("Exact screenClass from minecraft_get_inventory."),
+                    "expectedSyncId", integerProperty("containerSyncId from minecraft_get_inventory.", 0L, 100000L),
+                    "expectedRevision", integerProperty("stateRevision from minecraft_get_inventory.", 0L, Long.MAX_VALUE)
+                )),
+                false,
+                false,
+                false,
+                false
+            ));
+        }
+
         Map<String, Object> result = linked("tools", List.copyOf(tools));
         if (modern) {
             result.put("resultType", "complete");
@@ -425,6 +512,22 @@ public final class McpEndpoint {
                         includeTooltips, advanced, includeInventory, includeChat
                     ));
                 toolSuccess(exchange, id, result, "Read the current user-visible Minecraft UI without OCR.", modern);
+            }
+
+            case "wynn_get_ability_tree" -> {
+                if (!config.allowUiActions()) {
+                    toolError(exchange, id, "UI actions are disabled in config/wynn-ai-bridge.properties",
+                        Map.of("ok", false, "code", "UI_ACTIONS_DISABLED"), modern);
+                    break;
+                }
+                long maxAgeMs = longArg(args, "maxAgeMs", 2_000L, 1L, 10_000L);
+                int itemLimit = intArg(args, "itemLimit", 300, 1, 500);
+                int textLimit = intArg(args, "textLimit", 500, 1, 1000);
+                AbilityTreeDebugCollector.Result result = onClientThread(() -> AbilityTreeDebugCollector.collect(
+                    Minecraft.getInstance(), maxAgeMs, itemLimit, textLimit
+                ));
+                toolSuccess(exchange, id, result,
+                    "Read current Ability Tree screen evidence without interpreting nodes or changing game state.", modern);
             }
 
             case "wynn_inspect_hovered_item" -> {
@@ -538,6 +641,14 @@ public final class McpEndpoint {
                 toolSuccess(exchange, id, Map.of("queued", message), "Queued the Minecraft chat message.", modern);
             }
 
+            case "minecraft_click_gui_slot" -> clickGuiSlot(exchange, id, args, modern);
+
+            case "minecraft_move_inventory_item" -> moveInventoryItem(exchange, id, args, modern);
+
+            case "minecraft_withdraw_bank_item" -> withdrawBankItem(exchange, id, args, modern);
+
+            case "minecraft_equip_item" -> equipItem(exchange, id, args, modern);
+
             default -> rpcError(exchange, 200, id, -32601, "Unknown tool", name, modern);
         }
     }
@@ -567,6 +678,498 @@ public final class McpEndpoint {
     private void ensureActions() {
         if (!config.allowActions()) {
             throw new IllegalArgumentException("Actions are disabled in config/wynn-ai-bridge.properties");
+        }
+    }
+
+    private void clickGuiSlot(HttpExchange exchange, Object id, Map<String, Object> args, boolean modern) throws IOException {
+        int slot = requiredIntArg(args, "slot", 0, 1000);
+        String buttonName = requiredString(args, "button");
+        int button = switch (buttonName) {
+            case "left" -> 0;
+            case "right" -> 1;
+            default -> throw new IllegalArgumentException("button must be left or right");
+        };
+        String expectedItemName = requiredString(args, "expectedItemName");
+        String expectedScreen = requiredString(args, "expectedScreen");
+        int expectedSyncId = requiredIntArg(args, "expectedSyncId", 0, 100000);
+        long expectedRevision = requiredLongArg(args, "expectedRevision", 0L, Long.MAX_VALUE);
+
+        AtomicBoolean admitted = new AtomicBoolean();
+        UiActionService.ClickPair pair = null;
+        UiActionService.GuiSnapshot observed = null;
+        try {
+            beginUiAction(id, "minecraft_click_gui_slot", admitted);
+            pair = onClientThreadOnce(() -> {
+                requireUiActionStillActive();
+                return UiActionService.click(
+                    Minecraft.getInstance(), slot, button, expectedItemName,
+                    expectedScreen, expectedSyncId, expectedRevision
+                );
+            });
+            observed = awaitClickAcknowledgement(pair, expectedScreen);
+            if (observed.stateId() != pair.before().stateId() && UiActionService.clickResultMatches(observed, pair)) {
+                toolSuccess(exchange, id, linked(
+                    "ok", true,
+                    "action", "minecraft_click_gui_slot",
+                    "before", pair.before(),
+                    "after", observed,
+                    "verified", true
+                ), "Clicked the expected inventory slot and verified the synchronized GUI state.", modern);
+            } else {
+                toolError(exchange, id, "SERVER_STATE_NOT_VERIFIED: the server-synchronized slot/cursor state did not match the expected click result",
+                    linked("ok", false, "code", "SERVER_STATE_NOT_VERIFIED", "action", "minecraft_click_gui_slot",
+                        "before", pair.before(), "after", observed, "verified", false), modern);
+            }
+        } catch (UiActionGate.GateException e) {
+            toolError(exchange, id, e.getMessage(), uiActionError(e.code(), e.getMessage(), pair, observed), modern);
+        } catch (UiActionService.UiActionException e) {
+            toolError(exchange, id, e.getMessage(), uiActionError(e.code(), e.getMessage(), pair, observed), modern);
+        } catch (Exception e) {
+            toolError(exchange, id, "UI action failed: " + safeError(e), uiActionError("UI_ACTION_FAILED", safeError(e), pair, observed), modern);
+        } finally {
+            if (admitted.get()) UiActionGate.INSTANCE.endAction();
+        }
+    }
+
+    private void moveInventoryItem(HttpExchange exchange, Object id, Map<String, Object> args, boolean modern) throws IOException {
+        int fromSlot = requiredIntArg(args, "fromSlot", 0, 35);
+        int toSlot = requiredIntArg(args, "toSlot", 0, 35);
+        String expectedItemName = requiredString(args, "expectedItemName");
+        String expectedScreen = requiredString(args, "expectedScreen");
+        int expectedSyncId = requiredIntArg(args, "expectedSyncId", 0, 100000);
+        long expectedRevision = requiredLongArg(args, "expectedRevision", 0L, Long.MAX_VALUE);
+
+        AtomicBoolean admitted = new AtomicBoolean();
+        UiActionService.MoveStart start = null;
+        UiActionService.GuiSnapshot afterSource = null;
+        UiActionService.GuiSnapshot after = null;
+        try {
+            beginUiAction(id, "minecraft_move_inventory_item", admitted);
+            start = onClientThreadOnce(() -> {
+                requireUiActionStillActive();
+                return UiActionService.startMove(
+                    Minecraft.getInstance(), fromSlot, toSlot, expectedItemName,
+                    expectedScreen, expectedSyncId, expectedRevision
+                );
+            });
+            afterSource = awaitMoveSourceAcknowledgement(start);
+            if (afterSource == null) {
+                UiActionService.GuiSnapshot last = lastObservedMoveState(start, expectedScreen);
+                toolError(exchange, id, "SERVER_STATE_NOT_VERIFIED: source pickup was not acknowledged; no destination click was sent",
+                    linked("ok", false, "code", "SERVER_STATE_NOT_VERIFIED", "action", "minecraft_move_inventory_item",
+                        "before", start.plan().before(), "after", last, "changed", last != null, "verified", false), modern);
+                return;
+            }
+            UiActionService.MovePlan plan = start.plan();
+            UiActionService.GuiSnapshot sourceAcknowledged = afterSource;
+            after = onClientThreadOnce(() -> {
+                requireUiActionStillActive();
+                return UiActionService.placeMoveDestination(Minecraft.getInstance(), plan);
+            });
+            UiActionService.GuiSnapshot verified = awaitMoveDestinationAcknowledgement(plan, sourceAcknowledged);
+            if (verified != null) {
+                toolSuccess(exchange, id, linked(
+                    "ok", true,
+                    "action", "minecraft_move_inventory_item",
+                    "sourceInventorySlot", fromSlot,
+                    "destinationInventorySlot", toSlot,
+                    "before", plan.before(),
+                    "after", verified,
+                    "changed", true,
+                    "verified", true
+                ), "Moved the full stack and verified both server-synchronized inventory slots.", modern);
+            } else {
+                UiActionService.GuiSnapshot last = lastObservedMoveState(start, expectedScreen);
+                toolError(exchange, id, "SERVER_STATE_NOT_VERIFIED: the destination state was not acknowledged; inspect the current cursor and inventory before continuing",
+                    linked("ok", false, "code", "SERVER_STATE_NOT_VERIFIED", "action", "minecraft_move_inventory_item",
+                        "before", plan.before(), "after", last == null ? after : last, "changed", true, "verified", false), modern);
+            }
+        } catch (UiActionGate.GateException e) {
+            toolError(exchange, id, e.getMessage(), linked("ok", false, "code", e.code(), "error", e.getMessage(),
+                "before", start == null ? null : start.plan().before(), "after", after, "verified", false), modern);
+        } catch (UiActionService.UiActionException e) {
+            toolError(exchange, id, e.getMessage(), linked("ok", false, "code", e.code(), "error", e.getMessage(),
+                "before", start == null ? null : start.plan().before(), "after", afterSource, "verified", false), modern);
+        } catch (Exception e) {
+            toolError(exchange, id, "UI action failed: " + safeError(e), linked("ok", false, "code", "UI_ACTION_FAILED",
+                "error", safeError(e), "before", start == null ? null : start.plan().before(),
+                "after", after, "verified", false), modern);
+        } finally {
+            if (admitted.get()) UiActionGate.INSTANCE.endAction();
+        }
+    }
+
+    private void equipItem(HttpExchange exchange, Object id, Map<String, Object> args, boolean modern) throws IOException {
+        int inventorySlot = requiredIntArg(args, "inventorySlot", 0, 35);
+        String expectedItemName = requiredString(args, "expectedItemName");
+        String target = requiredString(args, "target");
+        String expectedScreen = requiredString(args, "expectedScreen");
+        int expectedSyncId = requiredIntArg(args, "expectedSyncId", 0, 100000);
+        long expectedRevision = requiredLongArg(args, "expectedRevision", 0L, Long.MAX_VALUE);
+
+        AtomicBoolean admitted = new AtomicBoolean();
+        UiActionService.EquipStart start = null;
+        UiActionService.GuiSnapshot afterSource = null;
+        UiActionService.GuiSnapshot after = null;
+        try {
+            beginUiAction(id, "minecraft_equip_item", admitted);
+            start = onClientThreadOnce(() -> {
+                requireUiActionStillActive();
+                return UiActionService.startEquip(Minecraft.getInstance(), inventorySlot, expectedItemName, target,
+                    expectedScreen, expectedSyncId, expectedRevision);
+            });
+            afterSource = awaitEquipSourceAcknowledgement(start);
+            if (afterSource == null) {
+                UiActionService.GuiSnapshot last = lastObservedEquipState(start, expectedScreen);
+                toolError(exchange, id, "SERVER_STATE_NOT_VERIFIED: source pickup was not acknowledged; no armor-slot click was sent",
+                    linked("ok", false, "code", "SERVER_STATE_NOT_VERIFIED", "action", "minecraft_equip_item",
+                        "before", start.plan().before(), "after", last, "verified", false), modern);
+                return;
+            }
+
+            UiActionService.EquipPlan plan = start.plan();
+            UiActionService.GuiSnapshot sourceAcknowledged = afterSource;
+            after = onClientThreadOnce(() -> {
+                requireUiActionStillActive();
+                return UiActionService.placeEquipTarget(Minecraft.getInstance(), plan);
+            });
+            UiActionService.GuiSnapshot verified = awaitEquipTargetAcknowledgement(plan, sourceAcknowledged);
+            if (verified != null) {
+                toolSuccess(exchange, id, linked(
+                    "ok", true,
+                    "action", "minecraft_equip_item",
+                    "inventorySlot", inventorySlot,
+                    "target", target,
+                    "before", plan.before(),
+                    "after", verified,
+                    "verified", true
+                ), "Equipped the item in the requested empty vanilla armor slot and verified synchronized state.", modern);
+            } else {
+                UiActionService.GuiSnapshot last = lastObservedEquipState(start, expectedScreen);
+                toolError(exchange, id, "SERVER_STATE_NOT_VERIFIED: equipment state was not acknowledged; inspect the current cursor and inventory before continuing",
+                    linked("ok", false, "code", "SERVER_STATE_NOT_VERIFIED", "action", "minecraft_equip_item",
+                        "before", plan.before(), "after", last == null ? after : last, "verified", false), modern);
+            }
+        } catch (UiActionGate.GateException e) {
+            toolError(exchange, id, e.getMessage(), linked("ok", false, "code", e.code(), "error", e.getMessage(),
+                "before", start == null ? null : start.plan().before(), "after", after, "verified", false), modern);
+        } catch (UiActionService.UiActionException e) {
+            toolError(exchange, id, e.getMessage(), linked("ok", false, "code", e.code(), "error", e.getMessage(),
+                "before", start == null ? null : start.plan().before(), "after", afterSource, "verified", false), modern);
+        } catch (Exception e) {
+            toolError(exchange, id, "UI action failed: " + safeError(e), linked("ok", false, "code", "UI_ACTION_FAILED",
+                "error", safeError(e), "before", start == null ? null : start.plan().before(),
+                "after", after, "verified", false), modern);
+        } finally {
+            if (admitted.get()) UiActionGate.INSTANCE.endAction();
+        }
+    }
+
+    private void withdrawBankItem(HttpExchange exchange, Object id, Map<String, Object> args, boolean modern) throws IOException {
+        int bankSlot = requiredIntArg(args, "bankSlot", 0, 44);
+        int inventorySlot = requiredIntArg(args, "inventorySlot", 0, 35);
+        String expectedItemId = requiredString(args, "expectedItemId");
+        String expectedItemName = requiredString(args, "expectedItemName");
+        int expectedBankPage = requiredIntArg(args, "expectedBankPage", BankWithdrawService.BANK_PAGE, BankWithdrawService.BANK_PAGE);
+        String expectedScreen = requiredString(args, "expectedScreen");
+        int expectedSyncId = requiredIntArg(args, "expectedSyncId", 1, 100000);
+        long expectedRevision = requiredLongArg(args, "expectedRevision", 0L, Long.MAX_VALUE);
+
+        AtomicBoolean admitted = new AtomicBoolean();
+        BankWithdrawService.BankWithdrawStart start = null;
+        UiActionService.GuiSnapshot afterSource = null;
+        UiActionService.GuiSnapshot afterDestination = null;
+        try {
+            beginUiAction(id, "minecraft_withdraw_bank_item", admitted);
+            start = onClientThreadOnce(() -> {
+                requireUiActionStillActive();
+                Minecraft minecraft = Minecraft.getInstance();
+                UiActionService.GuiSnapshot before = BankWithdrawService.capture(minecraft, expectedScreen);
+                BankWithdrawService.BankWithdrawPlan plan = BankWithdrawService.plan(
+                    before, expectedBankPage, bankSlot, inventorySlot, expectedItemId,
+                    expectedItemName, expectedScreen, expectedSyncId, expectedRevision
+                );
+                return BankWithdrawService.start(minecraft, plan);
+            });
+
+            afterSource = awaitBankWithdrawSourceAcknowledgement(start);
+            if (afterSource == null) {
+                UiActionService.GuiSnapshot last = lastObservedBankState(start, expectedScreen);
+                toolError(exchange, id,
+                    "SERVER_STATE_NOT_VERIFIED: the Bank source pickup was not acknowledged; the inventory destination was not clicked",
+                    linked("ok", false, "code", "SERVER_STATE_NOT_VERIFIED", "action", "minecraft_withdraw_bank_item",
+                        "before", BankWithdrawService.summary(start.plan().before(), start.plan()),
+                        "after", bankStateSummary(last, start.plan()), "verified", false), modern);
+                return;
+            }
+
+            BankWithdrawService.BankWithdrawPlan plan = start.plan();
+            UiActionService.GuiSnapshot sourceAcknowledged = afterSource;
+            afterDestination = onClientThreadOnce(() -> {
+                requireUiActionStillActive();
+                return BankWithdrawService.placeDestination(Minecraft.getInstance(), plan);
+            });
+            UiActionService.GuiSnapshot verified = awaitBankWithdrawDestinationAcknowledgement(plan, sourceAcknowledged);
+            if (verified != null) {
+                toolSuccess(exchange, id, linked(
+                    "ok", true,
+                    "action", "minecraft_withdraw_bank_item",
+                    "bankPage", expectedBankPage,
+                    "bankSlot", bankSlot,
+                    "inventorySlot", inventorySlot,
+                    "before", BankWithdrawService.summary(plan.before(), plan),
+                    "after", BankWithdrawService.summary(verified, plan),
+                    "changed", true,
+                    "verified", true,
+                    "bankWithdrawalsRemainingThisArm", UiActionGate.INSTANCE.status().bankWithdrawalsRemaining()
+                ), "Withdrew one single-count item from the recognized Bank page 2 and verified both synchronized slots.", modern);
+            } else {
+                UiActionService.GuiSnapshot last = lastObservedBankState(start, expectedScreen);
+                toolError(exchange, id,
+                    "SERVER_STATE_NOT_VERIFIED: the Bank withdrawal destination was not acknowledged; inspect the cursor and both slots before continuing",
+                    linked("ok", false, "code", "SERVER_STATE_NOT_VERIFIED", "action", "minecraft_withdraw_bank_item",
+                        "before", BankWithdrawService.summary(plan.before(), plan),
+                        "after", bankStateSummary(last == null ? afterDestination : last, plan),
+                        "changed", true, "verified", false), modern);
+            }
+        } catch (UiActionGate.GateException e) {
+            toolError(exchange, id, e.getMessage(), linked("ok", false, "code", e.code(), "error", e.getMessage(),
+                "before", start == null ? null : BankWithdrawService.summary(start.plan().before(), start.plan()),
+                "after", bankStateSummary(afterSource, start == null ? null : start.plan()), "verified", false), modern);
+        } catch (UiActionService.UiActionException e) {
+            toolError(exchange, id, e.getMessage(), linked("ok", false, "code", e.code(), "error", e.getMessage(),
+                "before", start == null ? null : BankWithdrawService.summary(start.plan().before(), start.plan()),
+                "after", bankStateSummary(afterSource, start == null ? null : start.plan()), "verified", false), modern);
+        } catch (Exception e) {
+            toolError(exchange, id, "UI action failed: " + safeError(e), linked("ok", false, "code", "UI_ACTION_FAILED",
+                "error", safeError(e), "before", start == null ? null : BankWithdrawService.summary(start.plan().before(), start.plan()),
+                "after", bankStateSummary(afterDestination, start == null ? null : start.plan()), "verified", false), modern);
+        } finally {
+            if (admitted.get()) UiActionGate.INSTANCE.endAction();
+        }
+    }
+
+    private void beginUiAction(Object id, String toolName, AtomicBoolean admitted) throws Exception {
+        if (!config.allowUiActions()) {
+            throw new UiActionGate.GateException("UI_ACTIONS_DISABLED", "UI actions are disabled in config/wynn-ai-bridge.properties");
+        }
+        if (id == null) {
+            throw new UiActionGate.GateException("MISSING_REQUEST_ID", "A unique MCP request id is required for UI actions");
+        }
+        if (!UiActionGate.INSTANCE.status().armed()) {
+            throw new UiActionGate.GateException("UI_ACTIONS_DISARMED", "UI actions are not locally armed");
+        }
+        String actionKey = toolName + "#" + id;
+        onClientThreadOnce(() -> {
+            Minecraft minecraft = Minecraft.getInstance();
+            UiActionGate.INSTANCE.beginAction(actionKey, minecraft.level,
+                minecraft.level != null && minecraft.player != null && minecraft.getConnection() != null);
+            admitted.set(true);
+            return null;
+        });
+    }
+
+    private static void requireUiActionStillActive() {
+        Minecraft minecraft = Minecraft.getInstance();
+        UiActionGate.INSTANCE.requireActionActive(
+            minecraft.level,
+            minecraft.level != null && minecraft.player != null && minecraft.getConnection() != null
+        );
+    }
+
+    private UiActionService.GuiSnapshot awaitClickAcknowledgement(
+        UiActionService.ClickPair pair,
+        String expectedScreen
+    ) throws Exception {
+        UiActionService.GuiSnapshot latest = pair.after();
+        for (int i = 0; i < 20; i++) {
+            Thread.sleep(100L);
+            latest = onClientThreadOnce(() -> UiActionService.capture(Minecraft.getInstance(), expectedScreen));
+            if (latest.stateId() != pair.before().stateId() && UiActionService.clickResultMatches(latest, pair)) return latest;
+        }
+        return latest;
+    }
+
+    private UiActionService.GuiSnapshot awaitMoveSourceAcknowledgement(UiActionService.MoveStart start) throws Exception {
+        UiActionService.GuiSnapshot latest = start.afterSourcePickup();
+        for (int i = 0; i < 20; i++) {
+            Thread.sleep(100L);
+            latest = onClientThreadOnce(() -> UiActionService.capture(Minecraft.getInstance(), start.plan().before().screenClass()));
+            if (latest.stateId() != start.plan().before().stateId()
+                && UiActionService.moveSourcePickupMatches(latest, start.plan())) return latest;
+        }
+        return null;
+    }
+
+    private UiActionService.GuiSnapshot awaitMoveDestinationAcknowledgement(
+        UiActionService.MovePlan plan,
+        UiActionService.GuiSnapshot afterSource
+    ) throws Exception {
+        UiActionService.GuiSnapshot latest = afterSource;
+        for (int i = 0; i < 20; i++) {
+            Thread.sleep(100L);
+            latest = onClientThreadOnce(() -> UiActionService.capture(Minecraft.getInstance(), plan.before().screenClass()));
+            if (latest.stateId() != afterSource.stateId() && UiActionService.moveResultMatches(latest, plan)) return latest;
+        }
+        return null;
+    }
+
+    private UiActionService.GuiSnapshot awaitEquipSourceAcknowledgement(UiActionService.EquipStart start) throws Exception {
+        UiActionService.GuiSnapshot latest = start.afterSourcePickup();
+        for (int i = 0; i < 20; i++) {
+            Thread.sleep(100L);
+            latest = onClientThreadOnce(() -> UiActionService.capture(
+                Minecraft.getInstance(), start.plan().before().screenClass()
+            ));
+            if (latest.stateId() != start.plan().before().stateId()
+                && UiActionService.equipSourcePickupMatches(latest, start.plan())) return latest;
+        }
+        return null;
+    }
+
+    private UiActionService.GuiSnapshot awaitBankWithdrawSourceAcknowledgement(
+        BankWithdrawService.BankWithdrawStart start
+    ) throws Exception {
+        UiActionService.GuiSnapshot latest = start.afterSourcePickup();
+        for (int i = 0; i < 20; i++) {
+            Thread.sleep(100L);
+            latest = onClientThreadOnce(() -> BankWithdrawService.capture(
+                Minecraft.getInstance(), start.plan().before().screenClass()
+            ));
+            if (latest.stateId() != start.plan().before().stateId()
+                && BankWithdrawService.sourcePickupMatches(latest, start.plan())) return latest;
+        }
+        return null;
+    }
+
+    private UiActionService.GuiSnapshot awaitBankWithdrawDestinationAcknowledgement(
+        BankWithdrawService.BankWithdrawPlan plan,
+        UiActionService.GuiSnapshot afterSource
+    ) throws Exception {
+        UiActionService.GuiSnapshot latest = afterSource;
+        for (int i = 0; i < 20; i++) {
+            Thread.sleep(100L);
+            latest = onClientThreadOnce(() -> BankWithdrawService.capture(
+                Minecraft.getInstance(), plan.before().screenClass()
+            ));
+            if (latest.stateId() != afterSource.stateId()
+                && BankWithdrawService.withdrawResultMatches(latest, plan)) return latest;
+        }
+        return null;
+    }
+
+    private UiActionService.GuiSnapshot lastObservedBankState(
+        BankWithdrawService.BankWithdrawStart start,
+        String expectedScreen
+    ) throws Exception {
+        try {
+            return onClientThreadOnce(() -> BankWithdrawService.capture(Minecraft.getInstance(), expectedScreen));
+        } catch (Exception ignored) {
+            return start.afterSourcePickup();
+        }
+    }
+
+    private static BankWithdrawService.BankState bankStateSummary(
+        UiActionService.GuiSnapshot snapshot,
+        BankWithdrawService.BankWithdrawPlan plan
+    ) {
+        return snapshot == null || plan == null ? null : BankWithdrawService.summary(snapshot, plan);
+    }
+
+    private UiActionService.GuiSnapshot awaitEquipTargetAcknowledgement(
+        UiActionService.EquipPlan plan,
+        UiActionService.GuiSnapshot afterSource
+    ) throws Exception {
+        UiActionService.GuiSnapshot latest = afterSource;
+        for (int i = 0; i < 20; i++) {
+            Thread.sleep(100L);
+            latest = onClientThreadOnce(() -> UiActionService.capture(Minecraft.getInstance(), plan.before().screenClass()));
+            if (latest.stateId() != afterSource.stateId() && UiActionService.equipResultMatches(latest, plan)) return latest;
+        }
+        return null;
+    }
+
+    private UiActionService.GuiSnapshot lastObservedEquipState(
+        UiActionService.EquipStart start,
+        String expectedScreen
+    ) throws Exception {
+        try {
+            return onClientThreadOnce(() -> UiActionService.capture(Minecraft.getInstance(), expectedScreen));
+        } catch (Exception ignored) {
+            return start.afterSourcePickup();
+        }
+    }
+
+    private UiActionService.GuiSnapshot lastObservedMoveState(
+        UiActionService.MoveStart start,
+        String expectedScreen
+    ) throws Exception {
+        try {
+            return onClientThreadOnce(() -> UiActionService.capture(Minecraft.getInstance(), expectedScreen));
+        } catch (Exception ignored) {
+            return start.afterSourcePickup();
+        }
+    }
+
+    private static Map<String, Object> uiActionError(
+        String code,
+        String message,
+        UiActionService.ClickPair pair,
+        UiActionService.GuiSnapshot after
+    ) {
+        return linked("ok", false, "code", code, "error", message,
+            "before", pair == null ? null : pair.before(),
+            "after", after == null && pair != null ? pair.after() : after,
+            "verified", false);
+    }
+
+    private static String safeError(Exception e) {
+        Throwable cause = e instanceof ExecutionException && e.getCause() != null ? e.getCause() : e;
+        String message = cause.getMessage();
+        return message == null || message.isBlank() ? cause.getClass().getSimpleName() : message;
+    }
+
+    private static long requiredLongArg(Map<String, Object> args, String name, long min, long max) {
+        if (!args.containsKey(name)) throw new IllegalArgumentException("Missing " + name);
+        Object value = args.get(name);
+        if (!(value instanceof Number number)) throw new IllegalArgumentException(name + " must be an integer");
+        long parsed = number.longValue();
+        if (parsed < min || parsed > max) throw new IllegalArgumentException(name + " is out of range");
+        return parsed;
+    }
+
+    private static int requiredIntArg(Map<String, Object> args, String name, int min, int max) {
+        return Math.toIntExact(requiredLongArg(args, name, min, max));
+    }
+
+    private <T> T onClientThreadOnce(Callable<T> task) throws Exception {
+        CompletableFuture<T> future = new CompletableFuture<>();
+        AtomicInteger phase = new AtomicInteger(0); // queued, running, finished, cancelled
+        Minecraft.getInstance().execute(() -> {
+            if (!phase.compareAndSet(0, 1)) return;
+            try {
+                future.complete(task.call());
+            } catch (Throwable t) {
+                future.completeExceptionally(t);
+            } finally {
+                phase.set(2);
+            }
+        });
+        try {
+            return future.get(2, TimeUnit.SECONDS);
+        } catch (TimeoutException timeout) {
+            if (phase.compareAndSet(0, 3)) {
+                throw new IllegalStateException("Minecraft client thread timed out before the UI action started; it was cancelled", timeout);
+            }
+            try {
+                return future.get(2, TimeUnit.SECONDS);
+            } catch (TimeoutException secondTimeout) {
+                throw new IllegalStateException("Minecraft client thread timed out after the UI action started; do not retry automatically", secondTimeout);
+            }
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof Exception exception) throw exception;
+            throw new IllegalStateException(cause);
         }
     }
 
@@ -679,6 +1282,11 @@ public final class McpEndpoint {
 
     private static Map<String, Object> tool(String name, String description, Map<String, Object> inputSchema,
                                              boolean readOnly, boolean openWorld) {
+        return tool(name, description, inputSchema, readOnly, !readOnly, readOnly, openWorld);
+    }
+
+    private static Map<String, Object> tool(String name, String description, Map<String, Object> inputSchema,
+                                             boolean readOnly, boolean destructive, boolean idempotent, boolean openWorld) {
         return linked(
             "name", name,
             "title", switch (name) {
@@ -699,14 +1307,17 @@ public final class McpEndpoint {
                 case "wynn_index_status" -> "Get Wynncraft Index Status";
                 case "minecraft_send_command" -> "Send Minecraft Command";
                 case "minecraft_send_chat" -> "Send Minecraft Chat";
+                case "minecraft_click_gui_slot" -> "Click Player Inventory Slot";
+                case "minecraft_move_inventory_item" -> "Move Player Inventory Item";
+                case "wynn_get_ability_tree" -> "Inspect Ability Tree Screen Evidence";
                 default -> name;
             },
             "description", description,
             "inputSchema", inputSchema,
             "annotations", linked(
                 "readOnlyHint", readOnly,
-                "destructiveHint", !readOnly,
-                "idempotentHint", readOnly,
+                "destructiveHint", destructive,
+                "idempotentHint", idempotent,
                 "openWorldHint", openWorld
             )
         );
@@ -724,8 +1335,16 @@ public final class McpEndpoint {
         return linked("type", "object", "properties", properties, "required", List.of(required), "additionalProperties", false);
     }
 
+    private static Map<String, Object> requiredObjectSchema(List<String> required, Map<String, Object> properties) {
+        return linked("type", "object", "properties", properties, "required", List.copyOf(required), "additionalProperties", false);
+    }
+
     private static Map<String, Object> stringProperty(String description) {
         return linked("type", "string", "description", description);
+    }
+
+    private static Map<String, Object> enumStringProperty(String description, List<String> values) {
+        return linked("type", "string", "description", description, "enum", List.copyOf(values));
     }
 
     private static Map<String, Object> booleanProperty(String description) {

@@ -5,6 +5,8 @@ import dev.tanaka.wynnaibridge.config.BridgeConfig;
 import dev.tanaka.wynnaibridge.http.BridgeHttpServer;
 import dev.tanaka.wynnaibridge.knowledge.WynnKnowledgeService;
 import dev.tanaka.wynnaibridge.state.StateCollector;
+import dev.tanaka.wynnaibridge.state.UiStateRevisionTracker;
+import dev.tanaka.wynnaibridge.ui.UiActionGate;
 import dev.tanaka.wynnaibridge.translation.DeepLTranslationProvider;
 import dev.tanaka.wynnaibridge.translation.DialogueTranslationGlossary;
 import dev.tanaka.wynnaibridge.translation.TranslationService;
@@ -15,7 +17,12 @@ import net.fabricmc.loader.api.FabricLoader;
 
 import java.time.Duration;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.command.v2.ClientCommands;
+import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
+import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
+import com.mojang.brigadier.arguments.IntegerArgumentType;
+import net.minecraft.network.chat.Component;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -71,7 +78,75 @@ public final class WynnAiBridgeClient implements ClientModInitializer {
             MessageStore.INSTANCE.add("chat", message.getString())
         );
 
+        ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> dispatcher.register(
+            ClientCommands.literal("wynnbridge")
+                .then(ClientCommands.literal("actions")
+                    .then(ClientCommands.literal("arm")
+                        .executes(context -> {
+                            var client = context.getSource().getClient();
+                            if (!config.allowUiActions()) {
+                                context.getSource().sendError(Component.literal("UI actions are disabled in the mod config."));
+                                return 0;
+                            }
+                            if (client.player == null || client.level == null || client.getConnection() == null) {
+                                context.getSource().sendError(Component.literal("Join a Minecraft world before arming UI actions."));
+                                return 0;
+                            }
+                            try {
+                                long expiresAt = UiActionGate.INSTANCE.arm(client.level, config.uiActionsMaxArmSeconds());
+                                context.getSource().sendFeedback(Component.literal(
+                                    "Wynn AI Bridge UI actions armed for " + config.uiActionsMaxArmSeconds() +
+                                        " seconds (expires at " + expiresAt + "). Bank withdrawals: 0."
+                                ));
+                                return 1;
+                            } catch (UiActionGate.GateException e) {
+                                context.getSource().sendError(Component.literal(e.getMessage()));
+                                return 0;
+                            }
+                        })
+                        .then(ClientCommands.literal("bank")
+                            .then(ClientCommands.argument("count", IntegerArgumentType.integer(1, 7)).executes(context -> {
+                                var client = context.getSource().getClient();
+                                if (!config.allowUiActions()) {
+                                    context.getSource().sendError(Component.literal("UI actions are disabled in the mod config."));
+                                    return 0;
+                                }
+                                if (client.player == null || client.level == null || client.getConnection() == null) {
+                                    context.getSource().sendError(Component.literal("Join a Minecraft world before arming UI actions."));
+                                    return 0;
+                                }
+                                int bankWithdrawals = IntegerArgumentType.getInteger(context, "count");
+                                try {
+                                    long expiresAt = UiActionGate.INSTANCE.arm(
+                                        client.level, config.uiActionsMaxArmSeconds(), bankWithdrawals
+                                    );
+                                    context.getSource().sendFeedback(Component.literal(
+                                        "Wynn AI Bridge UI actions armed for " + config.uiActionsMaxArmSeconds() +
+                                            " seconds (expires at " + expiresAt + "). Bank withdrawals: " + bankWithdrawals + "."
+                                    ));
+                                    return 1;
+                                } catch (UiActionGate.GateException e) {
+                                    context.getSource().sendError(Component.literal(e.getMessage()));
+                                    return 0;
+                                }
+                            }))))
+                    .then(ClientCommands.literal("disarm").executes(context -> {
+                        UiActionGate.INSTANCE.disarm();
+                        context.getSource().sendFeedback(Component.literal("Wynn AI Bridge UI actions disarmed."));
+                        return 1;
+                    }))
+                )
+        ));
+
+        ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> UiActionGate.INSTANCE.disarm());
+
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
+            UiStateRevisionTracker.INSTANCE.refresh(client);
+            UiActionGate.INSTANCE.observeWorld(
+                client.level,
+                client.level != null && client.player != null && client.getConnection() != null
+            );
+
             if (++tickCounter >= 4) {
                 tickCounter = 0;
                 StateCollector.INSTANCE.capture(client);

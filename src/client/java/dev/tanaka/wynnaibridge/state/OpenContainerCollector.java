@@ -27,6 +27,8 @@ public final class OpenContainerCollector {
             return Result.error("No container screen is open");
         }
 
+        long stateRevision = UiStateRevisionTracker.INSTANCE.refresh(minecraft);
+
         var menu = screen.getMenu();
         Component title = screen.getTitle();
         Slot hovered = ((AbstractContainerScreenAccessor) screen).wynnAiBridge$getHoveredSlot();
@@ -61,6 +63,8 @@ public final class OpenContainerCollector {
             menu.getClass().getName(),
             menu.containerId,
             menu.getStateId(),
+            stateRevision,
+            stateRevision,
             title.getString(),
             FormattedTextUtil.firstColorHex(title),
             menu.slots.size(),
@@ -88,6 +92,8 @@ public final class OpenContainerCollector {
         String menuClass,
         Integer containerId,
         Integer stateId,
+        long screenRevision,
+        long stateRevision,
         String title,
         String titleColor,
         Integer totalSlots,
@@ -98,7 +104,7 @@ public final class OpenContainerCollector {
     ) {
         static Result error(String error) {
             return new Result(false, error, System.currentTimeMillis(), "", "", null, null,
-                "", null, null, null, null, null, List.of());
+                0L, 0L, "", null, null, null, null, null, List.of());
         }
     }
 }

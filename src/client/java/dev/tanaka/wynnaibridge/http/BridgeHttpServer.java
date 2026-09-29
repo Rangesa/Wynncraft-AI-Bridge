@@ -13,6 +13,7 @@ import dev.tanaka.wynnaibridge.state.TooltipCollector;
 import dev.tanaka.wynnaibridge.state.OpenContainerCollector;
 import dev.tanaka.wynnaibridge.state.PlayerInventoryCollector;
 import dev.tanaka.wynnaibridge.state.VisibleUiCollector;
+import dev.tanaka.wynnaibridge.ui.UiActionGate;
 import net.minecraft.client.Minecraft;
 
 import java.io.IOException;
@@ -45,20 +46,26 @@ public final class BridgeHttpServer implements AutoCloseable {
         server.createContext("/health", exchange -> {
             if (!requestGuard(exchange)) return;
             if (!method(exchange, "GET")) return;
-            json(exchange, 200, Map.of(
-                "ok", true,
-                "name", "wynn-ai-bridge",
-                "version", ModVersion.get(),
-                "actionsEnabled", config.allowActions(),
-                "tokenConfigured", !config.token().isEmpty(),
-                "mcp", Map.of(
+            UiActionGate.Status uiStatus = UiActionGate.INSTANCE.status();
+            json(exchange, 200, Map.ofEntries(
+                Map.entry("ok", true),
+                Map.entry("name", "wynn-ai-bridge"),
+                Map.entry("version", ModVersion.get()),
+                Map.entry("actionsEnabled", config.allowActions()),
+                Map.entry("tokenConfigured", !config.token().isEmpty()),
+                Map.entry("uiActionsEnabled", config.allowUiActions()),
+                Map.entry("uiActionsArmed", config.allowUiActions() && uiStatus.armed()),
+                Map.entry("uiActionsArmExpiresAt", config.allowUiActions() ? uiStatus.expiresAtEpochMillis() : 0L),
+                Map.entry("uiActionsBankWithdrawalsRemaining", config.allowUiActions() && uiStatus.armed()
+                    ? uiStatus.bankWithdrawalsRemaining() : 0),
+                Map.entry("mcp", Map.of(
                     "path", McpEndpoint.PATH,
                     "protocols", java.util.List.of(McpEndpoint.MODERN_PROTOCOL, McpEndpoint.LEGACY_PROTOCOL)
-                ),
-                "captureSources", TextCaptureStore.INSTANCE.stats(),
-                "renderedItems", RenderedItemCaptureStore.INSTANCE.stats(),
-                "messages", MessageStore.INSTANCE.stats(),
-                "knowledge", WynnKnowledgeService.INSTANCE.status()
+                )),
+                Map.entry("captureSources", TextCaptureStore.INSTANCE.stats()),
+                Map.entry("renderedItems", RenderedItemCaptureStore.INSTANCE.stats()),
+                Map.entry("messages", MessageStore.INSTANCE.stats()),
+                Map.entry("knowledge", WynnKnowledgeService.INSTANCE.status())
             ));
         });
 

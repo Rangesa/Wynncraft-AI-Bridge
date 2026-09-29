@@ -1,0 +1,26 @@
+# Gradle outputs and local runtime files
+.gradle/
+build/
+run/
+logs/
+*.log
+
+# Local credentials and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.pfx
+*.token
+**/.cloudflared/
+**/cloudflare-credentials/
+**/cloudflared-credentials/
+**/cloudflare-secrets/
+**/*cloudflare*token*
+**/*Cloudflare*Token*
+**/*cloudflare*api*key*
+**/*Cloudflare*API*Key*
+**/*cloudflare*api*token*
+**/*Cloudflare*API*Token*
+**/????????-????-????-????-????????????.json

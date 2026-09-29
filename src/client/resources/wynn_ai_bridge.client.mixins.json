@@ -1,0 +1,15 @@
+{
+  "required": true,
+  "package": "dev.tanaka.wynnaibridge.mixin",
+  "compatibilityLevel": "JAVA_25",
+  "client": [
+    "AbstractContainerScreenAccessor",
+    "AbstractContainerScreenTooltipMixin",
+    "HudDialogueTranslationMixin",
+    "GuiGraphicsExtractorMixin",
+    "RenderingTextCollectorMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 0
+  }
+}

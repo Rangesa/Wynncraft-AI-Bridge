@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "wynn_ai_bridge",
+  "version": "${version}",
+  "name": "Wynn AI Bridge",
+  "description": "Client-side Minecraft/Wynncraft AI bridge with live non-OCR game-state capture, embedded MCP, and a read-only Wynncraft API/wiki knowledge index.",
+  "authors": ["Tanaka + OpenAI"],
+  "contact": {},
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "dev.tanaka.wynnaibridge.WynnAiBridgeClient"
+    ]
+  },
+  "mixins": [
+    "wynn_ai_bridge.client.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=${loader_version}",
+    "minecraft": "~${minecraft_version}",
+    "java": ">=25",
+    "fabric-api": ">=${fabric_api_version}"
+  }
+}

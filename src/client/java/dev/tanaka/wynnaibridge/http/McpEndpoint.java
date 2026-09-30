@@ -5,6 +5,7 @@ import dev.tanaka.wynnaibridge.ModVersion;
 import dev.tanaka.wynnaibridge.capture.MessageStore;
 import dev.tanaka.wynnaibridge.capture.TextCaptureStore;
 import dev.tanaka.wynnaibridge.config.BridgeConfig;
+import dev.tanaka.wynnaibridge.knowledge.WynnAbilityDataService;
 import dev.tanaka.wynnaibridge.knowledge.WynnKnowledgeService;
 import dev.tanaka.wynnaibridge.state.StateCollector;
 import dev.tanaka.wynnaibridge.state.TooltipCollector;
@@ -12,9 +13,13 @@ import dev.tanaka.wynnaibridge.state.OpenContainerCollector;
 import dev.tanaka.wynnaibridge.state.PlayerInventoryCollector;
 import dev.tanaka.wynnaibridge.state.VisibleUiCollector;
 import dev.tanaka.wynnaibridge.state.AbilityTreeDebugCollector;
+import dev.tanaka.wynnaibridge.state.AbilityTreeSemanticCollector;
 import dev.tanaka.wynnaibridge.ui.UiActionGate;
 import dev.tanaka.wynnaibridge.ui.UiActionService;
 import dev.tanaka.wynnaibridge.ui.BankWithdrawService;
+import dev.tanaka.wynnaibridge.ui.BankDepositService;
+import dev.tanaka.wynnaibridge.ui.WynnAbilitySelectionService;
+import dev.tanaka.wynnaibridge.ui.WynnSemanticUiService;
 import net.minecraft.client.Minecraft;
 
 import java.io.IOException;
@@ -55,6 +60,10 @@ public final class McpEndpoint {
 
     public McpEndpoint(BridgeConfig config) {
         this.config = config;
+    }
+
+    public static int toolCountForConfig(BridgeConfig config) {
+        return 20 + (config.allowActions() ? 2 : 0) + (config.allowUiActions() ? 10 : 0);
     }
 
     public void handle(HttpExchange exchange) throws IOException {
@@ -316,6 +325,48 @@ public final class McpEndpoint {
             true,
             false
         ));
+        tools.add(tool(
+            "wynn_get_official_ability_tree",
+            "Read the official Wynncraft Ability Tree for one class, including ids, names, page, slots, coordinates, requirements, links, locks and icon metadata. Uses a 24-hour local cache and may return stale cached data when the public API is unavailable.",
+            requiredObjectSchema("classId", linked("classId", enumStringProperty("Wynncraft class id.", WynnAbilityDataService.classIds()))),
+            true,
+            false
+        ));
+        tools.add(tool(
+            "wynn_get_class_info",
+            "Read official Wynncraft class and archetype data for one class from the public API with a 24-hour local cache.",
+            requiredObjectSchema("classId", linked("classId", enumStringProperty("Wynncraft class id.", WynnAbilityDataService.classIds()))),
+            true,
+            false
+        ));
+        tools.add(tool(
+            "wynn_get_player_abilities",
+            "Read currently unlocked Ability Tree nodes from the official public player API. Requires the player's username and character UUID; private or unavailable profiles return an error.",
+            requiredObjectSchema(List.of("username", "characterUuid"), linked(
+                "username", stringProperty("Public Wynncraft player username."),
+                "characterUuid", stringProperty("Character UUID."))),
+            true,
+            false
+        ));
+        tools.add(tool(
+            "wynn_get_skill_points",
+            "Read skill points only from a verified Character Info screen. Missing, conflicting, or stale labels remain unknown; this tool never changes points.",
+            emptyObjectSchema(),
+            true,
+            false
+        ));
+        tools.add(tool(
+                "wynn_get_ability_tree",
+                "Read-only Ability Tree analysis that joins official node/archetype ids, page, slot, coordinates, requirements, links and locks with current rendered items, menu slots, item identities, tooltips and captured GUI text. Returns matchConfidence and matchedBy; ambiguous or unrecognized state remains UNKNOWN. Rendered-only STRONG matches have no actionable menu slot.",
+            objectSchema(linked(
+                "classId", enumStringProperty("Optional Wynncraft class id for the official tree to compare with the currently visible GUI.", WynnAbilityDataService.classIds()),
+                "maxAgeMs", integerProperty("Maximum age of captured screen evidence in milliseconds.", 1L, 10_000L),
+                "itemLimit", integerProperty("Maximum rendered item records.", 1L, 500L),
+                "textLimit", integerProperty("Maximum captured text records.", 1L, 1000L)
+            )),
+            true,
+            false
+        ));
 
         if (config.allowActions()) {
             tools.add(tool(
@@ -339,17 +390,6 @@ public final class McpEndpoint {
         }
 
         if (config.allowUiActions()) {
-            tools.add(tool(
-                "wynn_get_ability_tree",
-                "Read-only runtime diagnostics for the visible screen/menu, open slots, rendered item stacks, hovered slot tooltip when available, and captured GUI text. It reports raw evidence and does not infer unlocked/prerequisite/point states or perform clicks.",
-                objectSchema(linked(
-                    "maxAgeMs", integerProperty("Maximum age of captured screen evidence in milliseconds.", 1L, 10_000L),
-                    "itemLimit", integerProperty("Maximum rendered item records.", 1L, 500L),
-                    "textLimit", integerProperty("Maximum captured text records.", 1L, 1000L)
-                )),
-                true,
-                false
-            ));
             tools.add(tool(
                 "minecraft_click_gui_slot",
                 "Perform one left/right pickup click on a populated slot in the vanilla player inventory screen. Requires the exact screen class, sync id, state revision, and item name from a fresh read. Arbitrary GUI screens and non-player slots are refused.",
@@ -384,13 +424,85 @@ public final class McpEndpoint {
             ));
             tools.add(tool(
                 "minecraft_withdraw_bank_item",
-                "Withdraw one single-count item from the recognized Wynncraft Bank page 2 into one empty player inventory slot. Only Bank menu slots 0-44 are eligible; page controls, stacks, deposits, merchants, trades, and other container screens are refused. A local arm must explicitly authorize 1-7 withdrawals.",
+                "Withdraw one single-count item from the currently recognized Wynncraft Bank page into an empty player inventory slot. Only Bank content slots 0-44 are eligible; page controls, stacks, deposits, merchants, trades, and other container screens are refused. Supply the current page and fresh revision from the read tool.",
                 requiredObjectSchema(List.of("bankSlot", "inventorySlot", "expectedItemId", "expectedItemName", "expectedBankPage", "expectedScreen", "expectedSyncId", "expectedRevision"), linked(
                     "bankSlot", integerProperty("Bank content menu slot from minecraft_get_open_container; only 0 through 44.", 0L, 44L),
                     "inventorySlot", integerProperty("Empty player inventory index from 0 through 35.", 0L, 35L),
                     "expectedItemId", stringProperty("Exact itemId from the current Bank slot."),
                     "expectedItemName", stringProperty("Exact item display name from the current Bank slot."),
-                    "expectedBankPage", integerProperty("The supported Wynncraft Bank page; this tool currently accepts page 2 only.", 2L, 2L),
+                    "expectedBankPage", integerProperty("The recognized current Wynncraft Bank page number.", 1L, 100L),
+                    "expectedScreen", stringProperty("Exact screenClass from minecraft_get_open_container."),
+                    "expectedSyncId", integerProperty("containerId from minecraft_get_open_container.", 1L, 100000L),
+                    "expectedRevision", integerProperty("stateRevision from minecraft_get_open_container.", 0L, Long.MAX_VALUE)
+                )),
+                false,
+                false,
+                false,
+                false
+            ));
+            tools.add(tool(
+                "wynn_deposit_bank_item",
+                "Deposit exactly one single-count item from the local player inventory into the currently recognized Wynncraft Bank page. Requires the local bank arm category, a fresh Bank page/revision, and exact item identity. The Bridge selects an empty Bank content slot internally; stacks, shift-click, page controls, merchants, and other screens are refused.",
+                requiredObjectSchema(List.of("inventorySlot", "expectedItemId", "expectedItemName", "expectedBankPage", "expectedScreen", "expectedSyncId", "expectedRevision"), linked(
+                    "inventorySlot", integerProperty("Player inventory index from 0 through 35 in the open Bank container.", 0L, 35L),
+                    "expectedItemId", stringProperty("Exact itemId from the current player inventory slot."),
+                    "expectedItemName", stringProperty("Exact item display name currently in inventorySlot."),
+                    "expectedBankPage", integerProperty("The recognized current Wynncraft Bank page number.", 1L, 100L),
+                    "expectedScreen", stringProperty("Exact screenClass from minecraft_get_open_container."),
+                    "expectedSyncId", integerProperty("containerId from minecraft_get_open_container.", 1L, 100000L),
+                    "expectedRevision", integerProperty("stateRevision from minecraft_get_open_container.", 0L, Long.MAX_VALUE)
+                )),
+                false,
+                false,
+                false,
+                false
+            ));
+            tools.add(tool(
+                "wynn_open_character_info",
+                "Open Character Info by uniquely recognizing the named Character Info compass in the player's inventory. The item must already be held in the selected hotbar slot. The caller supplies only fresh screen/sync/revision evidence; no slot number is accepted.",
+                requiredObjectSchema(List.of("expectedScreen", "expectedSyncId", "expectedRevision"), linked(
+                    "expectedScreen", stringProperty("Exact screenClass from minecraft_get_inventory."),
+                    "expectedSyncId", integerProperty("containerSyncId from minecraft_get_inventory.", 0L, 100000L),
+                    "expectedRevision", integerProperty("stateRevision from minecraft_get_inventory.", 0L, Long.MAX_VALUE)
+                )),
+                false,
+                false,
+                false,
+                false
+            ));
+            tools.add(tool(
+                "wynn_assign_skill_points",
+                "Assign 1-5 skill points by semantic skill name on a verified Character Info screen. Requires fresh screen/sync/revision, explicit available and assigned values, and one unique skill button whose tooltip matches the current value. Each point is clicked and server-verified before the next.",
+                requiredObjectSchema(List.of("skill", "amount", "expectedScreen", "expectedSyncId", "expectedRevision"), linked(
+                    "skill", enumStringProperty("Skill name.", List.of("strength", "dexterity", "intelligence", "defence", "agility")),
+                    "amount", integerProperty("Number of points to assign; bounded by local skills arm allowance.", 1L, 5L),
+                    "expectedScreen", stringProperty("Exact screenClass from wynn_get_skill_points."),
+                    "expectedSyncId", integerProperty("containerSyncId from wynn_get_skill_points.", 0L, 100000L),
+                    "expectedRevision", integerProperty("stateRevision from wynn_get_skill_points.", 0L, Long.MAX_VALUE)
+                )),
+                false,
+                true,
+                false,
+                false
+            ));
+            tools.add(tool(
+                "wynn_open_ability_tree",
+                "Open the Ability Tree by uniquely identifying the Ability Tree item name/tooltip on a verified Character Info screen, then verify the screen transition. No slot number is accepted.",
+                requiredObjectSchema(List.of("expectedScreen", "expectedSyncId", "expectedRevision"), linked(
+                    "expectedScreen", stringProperty("Exact screenClass from wynn_get_skill_points."),
+                    "expectedSyncId", integerProperty("containerSyncId from wynn_get_skill_points.", 0L, 100000L),
+                    "expectedRevision", integerProperty("stateRevision from wynn_get_skill_points.", 0L, Long.MAX_VALUE)
+                )),
+                false,
+                false,
+                false,
+                false
+            ));
+            tools.add(tool(
+                "wynn_open_bank_page",
+                "Move exactly one page forward or backward in a recognized Wynncraft Bank. The target must be adjacent to the current page; repeat with a fresh read/revision to reach a distant page. This uses only the Bank's recognized page navigation controls.",
+                requiredObjectSchema(List.of("page", "expectedScreen", "expectedSyncId", "expectedRevision"), linked(
+                    "page", integerProperty("Adjacent target page number, exactly currentPage + 1 or currentPage - 1.", 1L, 100L),
                     "expectedScreen", stringProperty("Exact screenClass from minecraft_get_open_container."),
                     "expectedSyncId", integerProperty("containerId from minecraft_get_open_container.", 1L, 100000L),
                     "expectedRevision", integerProperty("stateRevision from minecraft_get_open_container.", 0L, Long.MAX_VALUE)
@@ -416,6 +528,21 @@ public final class McpEndpoint {
                 false,
                 false
             ));
+            tools.add(tool(
+                "wynn_select_ability",
+                "Select exactly one official Wynncraft Ability Tree node. Requires the local ability arm category, a verified current Ability Tree/class/page, available AP, satisfied official NODE/ARCHETYPE/locks checks, and an EXACT or otherwise uniquely actionable live menu-slot identity from a fresh read. Provide abilityId and classId, never a raw slot or coordinate. Rendered-only matches without a menu slot are refused. One node is attempted per call; AP and selected state are checked after server synchronization.",
+                requiredObjectSchema(List.of("abilityId", "classId", "expectedScreen", "expectedSyncId", "expectedRevision"), linked(
+                    "abilityId", stringProperty("Exact official Ability Tree node id from wynn_get_official_ability_tree."),
+                    "classId", enumStringProperty("Class whose official tree was read and whose current GUI identity must match.", WynnAbilityDataService.classIds()),
+                    "expectedScreen", stringProperty("Exact screenClass from wynn_get_ability_tree runtimeEvidence."),
+                    "expectedSyncId", integerProperty("syncId from the fresh Ability Tree diagnostic.", 1L, 100000L),
+                    "expectedRevision", integerProperty("stateRevision from the fresh Ability Tree diagnostic.", 0L, Long.MAX_VALUE)
+                )),
+                false,
+                true,
+                false,
+                false
+            ));
         }
 
         Map<String, Object> result = linked("tools", List.copyOf(tools));
@@ -436,6 +563,28 @@ public final class McpEndpoint {
         switch (name) {
             case "minecraft_get_state" -> toolSuccess(exchange, id, StateCollector.INSTANCE.latest(),
                 "Read the current Minecraft client state.", modern);
+
+            case "wynn_get_official_ability_tree" -> {
+                String classId = requiredString(args, "classId");
+                var result = WynnAbilityDataService.INSTANCE.getAbilityTree(classId);
+                if (!result.ok()) toolError(exchange, id, result.error(), result, modern);
+                else toolSuccess(exchange, id, result, "Read the official Ability Tree data and local cache state.", modern);
+            }
+
+            case "wynn_get_class_info" -> {
+                String classId = requiredString(args, "classId");
+                var result = WynnAbilityDataService.INSTANCE.getClassInfo(classId);
+                if (!result.ok()) toolError(exchange, id, result.error(), result, modern);
+                else toolSuccess(exchange, id, result, "Read official Wynncraft class and archetype metadata.", modern);
+            }
+
+            case "wynn_get_player_abilities" -> {
+                String username = requiredString(args, "username");
+                String characterUuid = requiredString(args, "characterUuid");
+                var result = WynnAbilityDataService.INSTANCE.getPlayerAbilities(username, characterUuid);
+                if (!result.ok()) toolError(exchange, id, result.error(), result, modern);
+                else toolSuccess(exchange, id, result, "Read current unlocked Ability Tree nodes from the official public player API.", modern);
+            }
 
             case "minecraft_get_recent_text" -> {
                 long since = longArg(args, "since", 0L, 0L, Long.MAX_VALUE - 1L);
@@ -515,19 +664,38 @@ public final class McpEndpoint {
             }
 
             case "wynn_get_ability_tree" -> {
-                if (!config.allowUiActions()) {
-                    toolError(exchange, id, "UI actions are disabled in config/wynn-ai-bridge.properties",
-                        Map.of("ok", false, "code", "UI_ACTIONS_DISABLED"), modern);
-                    break;
-                }
                 long maxAgeMs = longArg(args, "maxAgeMs", 2_000L, 1L, 10_000L);
                 int itemLimit = intArg(args, "itemLimit", 300, 1, 500);
                 int textLimit = intArg(args, "textLimit", 500, 1, 1000);
                 AbilityTreeDebugCollector.Result result = onClientThread(() -> AbilityTreeDebugCollector.collect(
                     Minecraft.getInstance(), maxAgeMs, itemLimit, textLimit
                 ));
+                String classId = string(args.get("classId"));
+                if (classId == null || classId.isBlank()) {
+                    toolSuccess(exchange, id, result,
+                        "Read current Ability Tree screen evidence without changing game state. Provide classId to compare against official node data.", modern);
+                } else {
+                    var official = WynnAbilityDataService.INSTANCE.getAbilityTree(classId);
+                    if (!official.ok()) {
+                        toolSuccess(exchange, id, linked("runtimeEvidence", result,
+                                "officialTreeAvailable", false, "officialTreeError", official.error(),
+                                "note", "Official API failure does not prevent the local runtime diagnostic."),
+                            "Read runtime evidence; official Ability Tree data was unavailable.", modern);
+                    } else {
+                        AbilityTreeSemanticCollector.Result correlated = AbilityTreeSemanticCollector.correlate(
+                            official.data(), result);
+                        toolSuccess(exchange, id, linked("runtimeEvidence", result,
+                                "officialTree", official, "tree", correlated),
+                            "Joined official Ability Tree data with exact visible GUI item evidence; ambiguity remains UNKNOWN.", modern);
+                    }
+                }
+            }
+
+            case "wynn_get_skill_points" -> {
+                WynnSemanticUiService.Snapshot result = onClientThreadOnce(() ->
+                    WynnSemanticUiService.capture(Minecraft.getInstance()));
                 toolSuccess(exchange, id, result,
-                    "Read current Ability Tree screen evidence without interpreting nodes or changing game state.", modern);
+                    "Read current character skill/ability point evidence; unknown values remain unset.", modern);
             }
 
             case "wynn_inspect_hovered_item" -> {
@@ -646,6 +814,18 @@ public final class McpEndpoint {
             case "minecraft_move_inventory_item" -> moveInventoryItem(exchange, id, args, modern);
 
             case "minecraft_withdraw_bank_item" -> withdrawBankItem(exchange, id, args, modern);
+
+            case "wynn_deposit_bank_item" -> depositBankItem(exchange, id, args, modern);
+
+            case "wynn_select_ability" -> selectAbility(exchange, id, args, modern);
+
+            case "wynn_open_bank_page" -> openBankPage(exchange, id, args, modern);
+
+            case "wynn_open_character_info" -> openCharacterInfo(exchange, id, args, modern);
+
+            case "wynn_assign_skill_points" -> assignSkillPoints(exchange, id, args, modern);
+
+            case "wynn_open_ability_tree" -> openAbilityTree(exchange, id, args, modern);
 
             case "minecraft_equip_item" -> equipItem(exchange, id, args, modern);
 
@@ -870,7 +1050,7 @@ public final class McpEndpoint {
         int inventorySlot = requiredIntArg(args, "inventorySlot", 0, 35);
         String expectedItemId = requiredString(args, "expectedItemId");
         String expectedItemName = requiredString(args, "expectedItemName");
-        int expectedBankPage = requiredIntArg(args, "expectedBankPage", BankWithdrawService.BANK_PAGE, BankWithdrawService.BANK_PAGE);
+        int expectedBankPage = requiredIntArg(args, "expectedBankPage", BankWithdrawService.MIN_BANK_PAGE, BankWithdrawService.MAX_BANK_PAGE);
         String expectedScreen = requiredString(args, "expectedScreen");
         int expectedSyncId = requiredIntArg(args, "expectedSyncId", 1, 100000);
         long expectedRevision = requiredLongArg(args, "expectedRevision", 0L, Long.MAX_VALUE);
@@ -880,7 +1060,7 @@ public final class McpEndpoint {
         UiActionService.GuiSnapshot afterSource = null;
         UiActionService.GuiSnapshot afterDestination = null;
         try {
-            beginUiAction(id, "minecraft_withdraw_bank_item", admitted);
+            beginUiAction(id, "minecraft_withdraw_bank_item", UiActionGate.Category.BANK, 1, admitted);
             start = onClientThreadOnce(() -> {
                 requireUiActionStillActive();
                 Minecraft minecraft = Minecraft.getInstance();
@@ -922,7 +1102,7 @@ public final class McpEndpoint {
                     "changed", true,
                     "verified", true,
                     "bankWithdrawalsRemainingThisArm", UiActionGate.INSTANCE.status().bankWithdrawalsRemaining()
-                ), "Withdrew one single-count item from the recognized Bank page 2 and verified both synchronized slots.", modern);
+                ), "Withdrew one single-count item from the recognized Bank page and verified both synchronized slots.", modern);
             } else {
                 UiActionService.GuiSnapshot last = lastObservedBankState(start, expectedScreen);
                 toolError(exchange, id,
@@ -949,7 +1129,363 @@ public final class McpEndpoint {
         }
     }
 
+    private void openBankPage(HttpExchange exchange, Object id, Map<String, Object> args, boolean modern) throws IOException {
+        int targetPage = requiredIntArg(args, "page", BankWithdrawService.MIN_BANK_PAGE, BankWithdrawService.MAX_BANK_PAGE);
+        String expectedScreen = requiredString(args, "expectedScreen");
+        int expectedSyncId = requiredIntArg(args, "expectedSyncId", 1, 100000);
+        long expectedRevision = requiredLongArg(args, "expectedRevision", 0L, Long.MAX_VALUE);
+        AtomicBoolean admitted = new AtomicBoolean();
+        BankWithdrawService.BankPageStepPlan plan = null;
+        UiActionService.GuiSnapshot afterClick = null;
+        try {
+            beginUiAction(id, "wynn_open_bank_page", UiActionGate.Category.BANK, 1, admitted);
+            plan = onClientThreadOnce(() -> {
+                requireUiActionStillActive();
+                Minecraft minecraft = Minecraft.getInstance();
+                UiActionService.GuiSnapshot before = BankWithdrawService.capture(minecraft, expectedScreen);
+                BankWithdrawService.BankPageStepPlan checked = BankWithdrawService.planPageStep(
+                    before, targetPage, expectedScreen, expectedSyncId, expectedRevision
+                );
+                return checked;
+            });
+            BankWithdrawService.BankPageStepPlan checked = plan;
+            afterClick = onClientThreadOnce(() -> {
+                requireUiActionStillActive();
+                return BankWithdrawService.startPageStep(Minecraft.getInstance(), checked);
+            });
+            UiActionService.GuiSnapshot verified = awaitBankPageAcknowledgement(plan);
+            if (verified != null) {
+                toolSuccess(exchange, id, linked(
+                    "ok", true,
+                    "action", "wynn_open_bank_page",
+                    "beforePage", plan.currentPage(),
+                    "afterPage", targetPage,
+                    "before", bankPageSummary(plan.before()),
+                    "after", bankPageSummary(verified),
+                    "changed", true,
+                    "verified", true
+                ), "Moved one page in the recognized Wynncraft Bank and verified the server-synchronized page.", modern);
+            } else {
+                UiActionService.GuiSnapshot last = lastObservedBankPageState(expectedScreen, afterClick);
+                toolError(exchange, id, "SERVER_STATE_NOT_VERIFIED: the requested Bank page was not acknowledged",
+                    linked("ok", false, "code", "SERVER_STATE_NOT_VERIFIED", "action", "wynn_open_bank_page",
+                        "beforePage", plan.currentPage(), "expectedPage", targetPage,
+                        "before", bankPageSummary(plan.before()), "after", last == null ? null : bankPageSummary(last),
+                        "verified", false), modern);
+            }
+        } catch (UiActionGate.GateException e) {
+            toolError(exchange, id, e.getMessage(), linked("ok", false, "code", e.code(), "error", e.getMessage(),
+                "beforePage", plan == null ? null : plan.currentPage(), "verified", false), modern);
+        } catch (UiActionService.UiActionException e) {
+            toolError(exchange, id, e.getMessage(), linked("ok", false, "code", e.code(), "error", e.getMessage(),
+                "beforePage", plan == null ? null : plan.currentPage(), "verified", false), modern);
+        } catch (Exception e) {
+            toolError(exchange, id, "Bank page navigation failed: " + safeError(e), linked("ok", false,
+                "code", "UI_ACTION_FAILED", "error", safeError(e), "beforePage", plan == null ? null : plan.currentPage(),
+                "after", afterClick == null ? null : bankPageSummary(afterClick), "verified", false), modern);
+        } finally {
+            if (admitted.get()) UiActionGate.INSTANCE.endAction();
+        }
+    }
+
+    private void depositBankItem(HttpExchange exchange, Object id, Map<String, Object> args, boolean modern) throws IOException {
+        int inventorySlot = requiredIntArg(args, "inventorySlot", 0, 35);
+        String expectedItemId = requiredString(args, "expectedItemId");
+        String expectedItemName = requiredString(args, "expectedItemName");
+        int expectedBankPage = requiredIntArg(args, "expectedBankPage", BankWithdrawService.MIN_BANK_PAGE, BankWithdrawService.MAX_BANK_PAGE);
+        String expectedScreen = requiredString(args, "expectedScreen");
+        int expectedSyncId = requiredIntArg(args, "expectedSyncId", 1, 100000);
+        long expectedRevision = requiredLongArg(args, "expectedRevision", 0L, Long.MAX_VALUE);
+
+        AtomicBoolean admitted = new AtomicBoolean();
+        BankDepositService.DepositStart start = null;
+        UiActionService.GuiSnapshot afterSource = null;
+        UiActionService.GuiSnapshot afterDestination = null;
+        try {
+            beginUiAction(id, "wynn_deposit_bank_item", UiActionGate.Category.BANK, 1, admitted);
+            start = onClientThreadOnce(() -> {
+                requireUiActionStillActive();
+                Minecraft minecraft = Minecraft.getInstance();
+                UiActionService.GuiSnapshot before = BankDepositService.capture(minecraft, expectedScreen);
+                BankDepositService.DepositPlan plan = BankDepositService.plan(before, expectedBankPage,
+                    inventorySlot, expectedItemId, expectedItemName, expectedScreen, expectedSyncId, expectedRevision);
+                return BankDepositService.start(minecraft, plan);
+            });
+            afterSource = awaitBankDepositSourceAcknowledgement(start);
+            if (afterSource == null) {
+                toolError(exchange, id,
+                    "SERVER_STATE_NOT_VERIFIED: the inventory pickup was not acknowledged; the Bank destination was not clicked",
+                    linked("ok", false, "code", "SERVER_STATE_NOT_VERIFIED", "action", "wynn_deposit_bank_item",
+                        "before", BankDepositService.summary(start.plan().before(), start.plan()),
+                        "after", BankDepositService.summary(lastObservedDepositState(start, expectedScreen), start.plan()),
+                        "verified", false), modern);
+                return;
+            }
+            BankDepositService.DepositPlan plan = start.plan();
+            UiActionService.GuiSnapshot sourceAcknowledged = afterSource;
+            afterDestination = onClientThreadOnce(() -> {
+                requireUiActionStillActive();
+                return BankDepositService.placeDestination(Minecraft.getInstance(), plan);
+            });
+            UiActionService.GuiSnapshot verified = awaitBankDepositDestinationAcknowledgement(plan, sourceAcknowledged);
+            if (verified != null) {
+                toolSuccess(exchange, id, linked(
+                    "ok", true, "action", "wynn_deposit_bank_item", "bankPage", expectedBankPage,
+                    "inventorySlot", inventorySlot, "bankSlot", plan.bankMenuSlot(),
+                    "before", BankDepositService.summary(plan.before(), plan),
+                    "after", BankDepositService.summary(verified, plan), "changed", true, "verified", true
+                ), "Deposited one single-count item into an internally selected empty Bank slot and verified both synchronized slots.", modern);
+            } else {
+                UiActionService.GuiSnapshot last = lastObservedDepositState(start, expectedScreen);
+                toolError(exchange, id,
+                    "POSTCONDITION_FAILED: the Bank deposit did not reach the expected synchronized state; inspect the cursor and both slots before continuing",
+                    linked("ok", false, "code", "POSTCONDITION_FAILED", "action", "wynn_deposit_bank_item",
+                        "before", BankDepositService.summary(plan.before(), plan),
+                        "after", BankDepositService.summary(last == null ? afterDestination : last, plan),
+                        "changed", true, "verified", false), modern);
+            }
+        } catch (UiActionGate.GateException e) {
+            toolError(exchange, id, e.getMessage(), linked("ok", false, "code", e.code(), "error", e.getMessage(),
+                "before", start == null ? null : BankDepositService.summary(start.plan().before(), start.plan()),
+                "after", start == null ? null : BankDepositService.summary(afterSource, start.plan()), "verified", false), modern);
+        } catch (UiActionService.UiActionException e) {
+            toolError(exchange, id, e.getMessage(), linked("ok", false, "code", e.code(), "error", e.getMessage(),
+                "before", start == null ? null : BankDepositService.summary(start.plan().before(), start.plan()),
+                "after", start == null ? null : BankDepositService.summary(afterSource, start.plan()), "verified", false), modern);
+        } catch (Exception e) {
+            toolError(exchange, id, "Bank deposit failed: " + safeError(e), linked("ok", false, "code", "UI_ACTION_FAILED",
+                "error", safeError(e), "before", start == null ? null : BankDepositService.summary(start.plan().before(), start.plan()),
+                "after", start == null ? null : BankDepositService.summary(afterDestination, start.plan()), "verified", false), modern);
+        } finally {
+            if (admitted.get()) UiActionGate.INSTANCE.endAction();
+        }
+    }
+
+    private void selectAbility(HttpExchange exchange, Object id, Map<String, Object> args, boolean modern) throws IOException {
+        String abilityId = requiredString(args, "abilityId").strip();
+        String classId = requiredString(args, "classId");
+        String expectedScreen = requiredString(args, "expectedScreen");
+        int expectedSyncId = requiredIntArg(args, "expectedSyncId", 1, 100000);
+        long expectedRevision = requiredLongArg(args, "expectedRevision", 0L, Long.MAX_VALUE);
+        AtomicBoolean admitted = new AtomicBoolean();
+        AtomicBoolean clickAttempted = new AtomicBoolean();
+        WynnAbilitySelectionService.SelectionPlan plan = null;
+        AbilityTreeSemanticCollector.Result before = null;
+        AbilityTreeSemanticCollector.Result after = null;
+        try {
+            beginDeferredAbilityAction(id, admitted);
+            WynnAbilityDataService.DataResult<WynnAbilityDataService.AbilityTree> data =
+                WynnAbilityDataService.INSTANCE.getAbilityTree(classId);
+            if (!data.ok()) throw new UiActionService.UiActionException("OFFICIAL_TREE_UNAVAILABLE", data.error());
+            var official = data.data();
+            before = onClientThreadOnce(() -> WynnAbilitySelectionService.correlate(Minecraft.getInstance(), official));
+            plan = WynnAbilitySelectionService.plan(official, before, abilityId, classId,
+                expectedScreen, expectedSyncId, expectedRevision);
+            WynnAbilitySelectionService.SelectionPlan checkedPlan = plan;
+            after = onClientThreadOnce(() -> {
+                requireUiActionStillActive();
+                return WynnAbilitySelectionService.start(Minecraft.getInstance(), official, checkedPlan, () -> {
+                    Minecraft minecraft = Minecraft.getInstance();
+                    UiActionGate.INSTANCE.chargeAllowanceBeforeClick(minecraft.level,
+                        minecraft.level != null && minecraft.player != null && minecraft.getConnection() != null, 1);
+                    clickAttempted.set(true);
+                });
+            });
+            AbilityTreeSemanticCollector.Result verified = awaitAbilitySelectionAcknowledgement(official, plan, after);
+            if (verified != null) {
+                toolSuccess(exchange, id, linked("ok", true, "verified", true, "action", "wynn_select_ability",
+                    "before", abilitySelectionSummary(before, plan), "after", abilityTreeSummary(verified),
+                    "apiVerification", "NOT_REQUESTED", "allowanceConsumed", true),
+                    "Selected one Ability Tree node and verified the changed points and live node state after synchronization.", modern);
+            } else {
+                AbilityTreeSemanticCollector.Result last = lastObservedAbilityTree(official, after);
+                toolError(exchange, id, "POSTCONDITION_FAILED: the selected node and AP change were not both verified after synchronization",
+                    linked("ok", false, "code", "POSTCONDITION_FAILED", "action", "wynn_select_ability",
+                        "before", abilitySelectionSummary(before, plan), "after", abilityTreeSummary(last),
+                        "apiVerification", "NOT_REQUESTED", "allowanceConsumed", clickAttempted.get(), "verified", false), modern);
+            }
+        } catch (UiActionGate.GateException | UiActionService.UiActionException e) {
+            String code = e instanceof UiActionGate.GateException gate ? gate.code()
+                : ((UiActionService.UiActionException) e).code();
+            toolError(exchange, id, e.getMessage(), linked("ok", false, "code", code, "error", e.getMessage(),
+                "before", abilitySelectionSummary(before, plan), "after", abilityTreeSummary(after),
+                "allowanceConsumed", clickAttempted.get(), "verified", false), modern);
+        } catch (Exception e) {
+            toolError(exchange, id, "Ability selection failed: " + safeError(e), linked("ok", false, "code", "UI_ACTION_FAILED",
+                "error", safeError(e), "before", abilitySelectionSummary(before, plan), "after", abilityTreeSummary(after),
+                "allowanceConsumed", clickAttempted.get(), "verified", false), modern);
+        } finally {
+            if (admitted.get()) UiActionGate.INSTANCE.endAction();
+        }
+    }
+
+    private void openCharacterInfo(HttpExchange exchange, Object id, Map<String, Object> args, boolean modern) throws IOException {
+        String expectedScreen = requiredString(args, "expectedScreen");
+        int expectedSyncId = requiredIntArg(args, "expectedSyncId", 0, 100000);
+        long expectedRevision = requiredLongArg(args, "expectedRevision", 0L, Long.MAX_VALUE);
+        AtomicBoolean admitted = new AtomicBoolean();
+        WynnSemanticUiService.CharacterInfoPlan plan = null;
+        WynnSemanticUiService.Snapshot after = null;
+        try {
+            beginUiAction(id, "wynn_open_character_info", UiActionGate.Category.SKILLS, 1, admitted);
+            plan = onClientThreadOnce(() -> {
+                requireUiActionStillActive();
+                return WynnSemanticUiService.planOpenCharacterInfo(
+                    Minecraft.getInstance(), expectedScreen, expectedSyncId, expectedRevision);
+            });
+            WynnSemanticUiService.CharacterInfoPlan checked = plan;
+            onClientThreadOnce(() -> {
+                requireUiActionStillActive();
+                WynnSemanticUiService.startOpenCharacterInfo(Minecraft.getInstance(), checked);
+                return null;
+            });
+            after = awaitCharacterInfoAcknowledgement(plan);
+            if (after != null) {
+                toolSuccess(exchange, id, linked("ok", true, "action", "wynn_open_character_info",
+                    "before", semanticUiSummary(plan.before()), "after", semanticUiSummary(after),
+                    "verified", true), "Opened and verified the Character Info screen using its uniquely identified held item.", modern);
+            } else {
+                WynnSemanticUiService.Snapshot last = captureSemanticUiOrNull(plan.before());
+                toolError(exchange, id, "SCREEN_TRANSITION_NOT_VERIFIED: a Character Info screen was not identified after item use",
+                    linked("ok", false, "code", "SCREEN_TRANSITION_NOT_VERIFIED", "action", "wynn_open_character_info",
+                        "before", semanticUiSummary(plan.before()), "after", last == null ? null : semanticUiSummary(last),
+                        "verified", false), modern);
+            }
+        } catch (UiActionGate.GateException e) {
+            toolError(exchange, id, e.getMessage(), linked("ok", false, "code", e.code(), "error", e.getMessage(),
+                "before", plan == null ? null : semanticUiSummary(plan.before()), "verified", false), modern);
+        } catch (UiActionService.UiActionException e) {
+            toolError(exchange, id, e.getMessage(), linked("ok", false, "code", e.code(), "error", e.getMessage(),
+                "before", plan == null ? null : semanticUiSummary(plan.before()),
+                "after", after == null ? null : semanticUiSummary(after), "verified", false), modern);
+        } catch (Exception e) {
+            toolError(exchange, id, "Character Info action failed: " + safeError(e), linked("ok", false,
+                "code", "UI_ACTION_FAILED", "error", safeError(e),
+                "before", plan == null ? null : semanticUiSummary(plan.before()), "verified", false), modern);
+        } finally {
+            if (admitted.get()) UiActionGate.INSTANCE.endAction();
+        }
+    }
+
+    private void assignSkillPoints(HttpExchange exchange, Object id, Map<String, Object> args, boolean modern) throws IOException {
+        String skillName = requiredString(args, "skill");
+        int amount = requiredIntArg(args, "amount", 1, 5);
+        String expectedScreen = requiredString(args, "expectedScreen");
+        int expectedSyncId = requiredIntArg(args, "expectedSyncId", 0, 100000);
+        long expectedRevision = requiredLongArg(args, "expectedRevision", 0L, Long.MAX_VALUE);
+        AtomicBoolean admitted = new AtomicBoolean();
+        WynnSemanticUiService.SkillPlan plan = null;
+        WynnSemanticUiService.Snapshot current = null;
+        List<Map<String, Object>> steps = new ArrayList<>();
+        try {
+            WynnSemanticUiService.Skill skill = WynnSemanticUiService.Skill.parse(skillName);
+            beginUiAction(id, "wynn_assign_skill_points", UiActionGate.Category.SKILLS, amount, admitted);
+            plan = onClientThreadOnce(() -> {
+                requireUiActionStillActive();
+                return WynnSemanticUiService.planSkillAssignment(Minecraft.getInstance(), skillName, amount,
+                    expectedScreen, expectedSyncId, expectedRevision);
+            });
+            current = plan.before();
+            WynnSemanticUiService.SkillPlan checkedPlan = plan;
+            for (int index = 0; index < amount; index++) {
+                WynnSemanticUiService.Snapshot beforeStep = current;
+                WynnSemanticUiService.SkillClick click = onClientThreadOnce(() -> {
+                    requireUiActionStillActive();
+                    return WynnSemanticUiService.startSkillPointClick(Minecraft.getInstance(), checkedPlan, beforeStep);
+                });
+                WynnSemanticUiService.Snapshot verified = awaitSkillPointAcknowledgement(click);
+                if (verified == null) {
+                    WynnSemanticUiService.Snapshot last = captureSemanticUiOrNull(beforeStep);
+                    toolError(exchange, id, "SERVER_STATE_NOT_VERIFIED: skill value and unassigned points did not both change as expected; no further clicks were sent",
+                        linked("ok", false, "code", "SERVER_STATE_NOT_VERIFIED", "action", "wynn_assign_skill_points",
+                            "skill", skill.displayName(), "requestedAmount", amount, "completedAmount", steps.size(),
+                            "before", skillSummary(plan.before(), skill),
+                            "after", last == null ? null : skillSummary(last, skill), "steps", List.copyOf(steps),
+                            "verified", false), modern);
+                    return;
+                }
+                steps.add(linked("before", skillSummary(beforeStep, skill), "after", skillSummary(verified, skill), "verified", true));
+                current = verified;
+            }
+            toolSuccess(exchange, id, linked("ok", true, "action", "wynn_assign_skill_points",
+                "skill", skill.displayName(), "requestedAmount", amount, "completedAmount", amount,
+                "before", skillSummary(plan.before(), skill), "after", skillSummary(current, skill),
+                "steps", List.copyOf(steps), "verified", true),
+                "Assigned each requested skill point and verified both the skill value and remaining points after each server sync.", modern);
+        } catch (UiActionGate.GateException e) {
+            toolError(exchange, id, e.getMessage(), linked("ok", false, "code", e.code(), "error", e.getMessage(),
+                "completedAmount", steps.size(), "steps", List.copyOf(steps),
+                "before", plan == null ? null : skillSummary(plan.before(), plan.skill()),
+                "after", current == null || plan == null ? null : skillSummary(current, plan.skill()), "verified", false), modern);
+        } catch (UiActionService.UiActionException e) {
+            toolError(exchange, id, e.getMessage(), linked("ok", false, "code", e.code(), "error", e.getMessage(),
+                "completedAmount", steps.size(), "steps", List.copyOf(steps),
+                "before", plan == null ? null : skillSummary(plan.before(), plan.skill()),
+                "after", current == null || plan == null ? null : skillSummary(current, plan.skill()), "verified", false), modern);
+        } catch (Exception e) {
+            toolError(exchange, id, "Skill assignment failed: " + safeError(e), linked("ok", false,
+                "code", "UI_ACTION_FAILED", "error", safeError(e), "completedAmount", steps.size(),
+                "steps", List.copyOf(steps), "verified", false), modern);
+        } finally {
+            if (admitted.get()) UiActionGate.INSTANCE.endAction();
+        }
+    }
+
+    private void openAbilityTree(HttpExchange exchange, Object id, Map<String, Object> args, boolean modern) throws IOException {
+        String expectedScreen = requiredString(args, "expectedScreen");
+        int expectedSyncId = requiredIntArg(args, "expectedSyncId", 0, 100000);
+        long expectedRevision = requiredLongArg(args, "expectedRevision", 0L, Long.MAX_VALUE);
+        AtomicBoolean admitted = new AtomicBoolean();
+        WynnSemanticUiService.AbilityButtonPlan plan = null;
+        WynnSemanticUiService.Snapshot after = null;
+        try {
+            beginUiAction(id, "wynn_open_ability_tree", UiActionGate.Category.ABILITY, 1, admitted);
+            plan = onClientThreadOnce(() -> {
+                requireUiActionStillActive();
+                return WynnSemanticUiService.planOpenAbilityTree(
+                    Minecraft.getInstance(), expectedScreen, expectedSyncId, expectedRevision);
+            });
+            WynnSemanticUiService.AbilityButtonPlan checked = plan;
+            onClientThreadOnce(() -> {
+                requireUiActionStillActive();
+                WynnSemanticUiService.startOpenAbilityTree(Minecraft.getInstance(), checked);
+                return null;
+            });
+            after = awaitAbilityTreeAcknowledgement(plan);
+            if (after != null) {
+                toolSuccess(exchange, id, linked("ok", true, "action", "wynn_open_ability_tree",
+                    "before", semanticUiSummary(plan.before()), "after", semanticUiSummary(after), "verified", true),
+                    "Opened and verified the Ability Tree using its uniquely identified in-screen control.", modern);
+            } else {
+                WynnSemanticUiService.Snapshot last = captureSemanticUiOrNull(plan.before());
+                toolError(exchange, id, "SCREEN_TRANSITION_NOT_VERIFIED: an Ability Tree screen was not identified after the control click",
+                    linked("ok", false, "code", "SCREEN_TRANSITION_NOT_VERIFIED", "action", "wynn_open_ability_tree",
+                        "before", semanticUiSummary(plan.before()), "after", last == null ? null : semanticUiSummary(last),
+                        "verified", false), modern);
+            }
+        } catch (UiActionGate.GateException e) {
+            toolError(exchange, id, e.getMessage(), linked("ok", false, "code", e.code(), "error", e.getMessage(),
+                "before", plan == null ? null : semanticUiSummary(plan.before()), "verified", false), modern);
+        } catch (UiActionService.UiActionException e) {
+            toolError(exchange, id, e.getMessage(), linked("ok", false, "code", e.code(), "error", e.getMessage(),
+                "before", plan == null ? null : semanticUiSummary(plan.before()),
+                "after", after == null ? null : semanticUiSummary(after), "verified", false), modern);
+        } catch (Exception e) {
+            toolError(exchange, id, "Ability Tree open action failed: " + safeError(e), linked("ok", false,
+                "code", "UI_ACTION_FAILED", "error", safeError(e), "before", plan == null ? null : semanticUiSummary(plan.before()),
+                "verified", false), modern);
+        } finally {
+            if (admitted.get()) UiActionGate.INSTANCE.endAction();
+        }
+    }
+
     private void beginUiAction(Object id, String toolName, AtomicBoolean admitted) throws Exception {
+        beginUiAction(id, toolName, UiActionGate.Category.INVENTORY, 1, admitted);
+    }
+
+    private void beginUiAction(
+        Object id, String toolName, UiActionGate.Category category, int units, AtomicBoolean admitted
+    ) throws Exception {
         if (!config.allowUiActions()) {
             throw new UiActionGate.GateException("UI_ACTIONS_DISABLED", "UI actions are disabled in config/wynn-ai-bridge.properties");
         }
@@ -959,11 +1495,13 @@ public final class McpEndpoint {
         if (!UiActionGate.INSTANCE.status().armed()) {
             throw new UiActionGate.GateException("UI_ACTIONS_DISARMED", "UI actions are not locally armed");
         }
-        String actionKey = toolName + "#" + id;
+        // MCP request ids are global across tools; do not namespace and accidentally allow cross-tool replay.
+        String actionKey = String.valueOf(id);
         onClientThreadOnce(() -> {
             Minecraft minecraft = Minecraft.getInstance();
             UiActionGate.INSTANCE.beginAction(actionKey, minecraft.level,
-                minecraft.level != null && minecraft.player != null && minecraft.getConnection() != null);
+                minecraft.level != null && minecraft.player != null && minecraft.getConnection() != null,
+                category, units);
             admitted.set(true);
             return null;
         });
@@ -1056,6 +1594,214 @@ public final class McpEndpoint {
                 && BankWithdrawService.withdrawResultMatches(latest, plan)) return latest;
         }
         return null;
+    }
+
+    private UiActionService.GuiSnapshot awaitBankDepositSourceAcknowledgement(
+        BankDepositService.DepositStart start
+    ) throws Exception {
+        UiActionService.GuiSnapshot latest = start.afterSourcePickup();
+        for (int i = 0; i < 20; i++) {
+            if (latest.stateId() != start.plan().before().stateId()
+                && BankDepositService.sourcePickupMatches(latest, start.plan())) return latest;
+            Thread.sleep(100L);
+            latest = onClientThreadOnce(() -> BankDepositService.capture(
+                Minecraft.getInstance(), start.plan().before().screenClass()));
+        }
+        return null;
+    }
+
+    private UiActionService.GuiSnapshot awaitBankDepositDestinationAcknowledgement(
+        BankDepositService.DepositPlan plan,
+        UiActionService.GuiSnapshot afterSource
+    ) throws Exception {
+        UiActionService.GuiSnapshot latest = afterSource;
+        for (int i = 0; i < 20; i++) {
+            Thread.sleep(100L);
+            latest = onClientThreadOnce(() -> BankDepositService.capture(Minecraft.getInstance(), plan.before().screenClass()));
+            if (latest.stateId() != afterSource.stateId() && BankDepositService.depositResultMatches(latest, plan)) return latest;
+        }
+        return null;
+    }
+
+    private UiActionService.GuiSnapshot lastObservedDepositState(
+        BankDepositService.DepositStart start, String expectedScreen
+    ) {
+        try {
+            return onClientThreadOnce(() -> BankDepositService.capture(Minecraft.getInstance(), expectedScreen));
+        } catch (Exception ignored) {
+            return start.afterSourcePickup();
+        }
+    }
+
+    private void beginDeferredAbilityAction(Object id, AtomicBoolean admitted) throws Exception {
+        if (!config.allowUiActions()) {
+            throw new UiActionGate.GateException("UI_ACTIONS_DISABLED", "UI actions are disabled in config/wynn-ai-bridge.properties");
+        }
+        if (id == null) throw new UiActionGate.GateException("MISSING_REQUEST_ID", "A unique MCP request id is required for UI actions");
+        if (!UiActionGate.INSTANCE.status().armed()) {
+            throw new UiActionGate.GateException("UI_ACTIONS_DISARMED", "UI actions are not locally armed");
+        }
+        String actionKey = String.valueOf(id);
+        onClientThreadOnce(() -> {
+            Minecraft minecraft = Minecraft.getInstance();
+            UiActionGate.INSTANCE.beginActionDeferredCharge(actionKey, minecraft.level,
+                minecraft.level != null && minecraft.player != null && minecraft.getConnection() != null,
+                UiActionGate.Category.ABILITY, 1);
+            admitted.set(true);
+            return null;
+        });
+    }
+
+    private AbilityTreeSemanticCollector.Result awaitAbilitySelectionAcknowledgement(
+        WynnAbilityDataService.AbilityTree official,
+        WynnAbilitySelectionService.SelectionPlan plan,
+        AbilityTreeSemanticCollector.Result afterClick
+    ) throws Exception {
+        if (WynnAbilitySelectionService.selectionVerified(afterClick, plan)) return afterClick;
+        for (int i = 0; i < 20; i++) {
+            Thread.sleep(100L);
+            AbilityTreeSemanticCollector.Result latest = onClientThreadOnce(() -> {
+                requireUiActionStillActive();
+                return WynnAbilitySelectionService.correlate(Minecraft.getInstance(), official);
+            });
+            if (WynnAbilitySelectionService.selectionVerified(latest, plan)) return latest;
+        }
+        return null;
+    }
+
+    private AbilityTreeSemanticCollector.Result lastObservedAbilityTree(
+        WynnAbilityDataService.AbilityTree official, AbilityTreeSemanticCollector.Result fallback
+    ) {
+        try {
+            return onClientThreadOnce(() -> WynnAbilitySelectionService.correlate(Minecraft.getInstance(), official));
+        } catch (Exception ignored) {
+            return fallback;
+        }
+    }
+
+    private static Map<String, Object> abilityTreeSummary(AbilityTreeSemanticCollector.Result result) {
+        if (result == null) return null;
+        return linked("capturedAt", System.currentTimeMillis(), "screenClass", result.screenClass(),
+            "syncId", result.syncId(), "containerStateId", result.containerStateId(),
+            "stateRevision", result.stateRevision(), "classId", result.classId(),
+            "classVerified", result.classVerified(), "abilityTreeRecognized", result.abilityTreeRecognized(),
+            "availablePoints", result.availablePoints(), "page", result.page());
+    }
+
+    private static Map<String, Object> abilitySelectionSummary(
+        AbilityTreeSemanticCollector.Result result, WynnAbilitySelectionService.SelectionPlan plan
+    ) {
+        if (result == null && plan == null) return null;
+        return linked("screenClass", result == null ? null : result.screenClass(),
+            "syncId", result == null ? null : result.syncId(),
+            "containerStateId", result == null ? null : result.containerStateId(),
+            "stateRevision", result == null ? null : result.stateRevision(),
+            "classId", result == null ? null : result.classId(),
+            "availablePoints", result == null ? null : result.availablePoints(),
+            "abilityId", plan == null ? null : plan.officialNode().id(),
+            "abilityName", plan == null ? null : plan.officialNode().name(),
+            "nodeState", plan == null ? null : plan.runtimeNode().state(),
+            "matchConfidence", plan == null ? null : plan.runtimeNode().matchConfidence(),
+            "screenSlot", plan == null ? null : plan.runtimeNode().menuSlot(),
+            "cost", plan == null ? null : plan.cost());
+    }
+
+    private UiActionService.GuiSnapshot awaitBankPageAcknowledgement(
+        BankWithdrawService.BankPageStepPlan plan
+    ) throws Exception {
+        for (int i = 0; i < 20; i++) {
+            Thread.sleep(100L);
+            UiActionService.GuiSnapshot latest = onClientThreadOnce(() ->
+                BankWithdrawService.capture(Minecraft.getInstance(), plan.before().screenClass()));
+            if (BankWithdrawService.pageStepMatches(latest, plan)) return latest;
+        }
+        return null;
+    }
+
+    private WynnSemanticUiService.Snapshot awaitCharacterInfoAcknowledgement(
+        WynnSemanticUiService.CharacterInfoPlan plan
+    ) throws Exception {
+        for (int i = 0; i < 20; i++) {
+            Thread.sleep(100L);
+            WynnSemanticUiService.Snapshot latest = onClientThreadOnce(() ->
+                WynnSemanticUiService.capture(Minecraft.getInstance()));
+            if (latest.screenIdentity() != plan.before().screenIdentity() && latest.characterInfoRecognized()) return latest;
+        }
+        return null;
+    }
+
+    private WynnSemanticUiService.Snapshot awaitAbilityTreeAcknowledgement(
+        WynnSemanticUiService.AbilityButtonPlan plan
+    ) throws Exception {
+        for (int i = 0; i < 20; i++) {
+            Thread.sleep(100L);
+            WynnSemanticUiService.Snapshot latest = onClientThreadOnce(() ->
+                WynnSemanticUiService.capture(Minecraft.getInstance()));
+            if (WynnSemanticUiService.abilityTreeOpened(plan.before(), latest)) return latest;
+        }
+        return null;
+    }
+
+    private WynnSemanticUiService.Snapshot awaitSkillPointAcknowledgement(
+        WynnSemanticUiService.SkillClick click
+    ) throws Exception {
+        for (int i = 0; i < 20; i++) {
+            Thread.sleep(100L);
+            WynnSemanticUiService.Snapshot latest = onClientThreadOnce(() ->
+                WynnSemanticUiService.capture(Minecraft.getInstance()));
+            if (latest.screenIdentity() != click.before().screenIdentity()
+                || latest.syncId() != click.before().syncId() || !latest.characterInfoRecognized()) return null;
+            if (WynnSemanticUiService.skillClickVerified(latest, click)) return latest;
+        }
+        return null;
+    }
+
+    private WynnSemanticUiService.Snapshot captureSemanticUiOrNull(
+        WynnSemanticUiService.Snapshot fallback
+    ) {
+        try {
+            return onClientThreadOnce(() -> WynnSemanticUiService.capture(Minecraft.getInstance()));
+        } catch (Exception ignored) {
+            return fallback;
+        }
+    }
+
+    private static Map<String, Object> semanticUiSummary(WynnSemanticUiService.Snapshot snapshot) {
+        return linked("capturedAt", snapshot.capturedAt(), "screenClass", snapshot.screenClass(),
+            "screenTitle", snapshot.title(), "menuClass", snapshot.menuClass(), "syncId", snapshot.syncId(),
+            "stateId", snapshot.stateId(), "stateRevision", snapshot.stateRevision(),
+            "characterInfoRecognized", snapshot.characterInfoRecognized(),
+            "abilityTreeRecognized", snapshot.abilityTreeRecognized(),
+            "unassignedSkillPoints", snapshot.unassignedSkillPoints(),
+            "unusedAbilityPoints", snapshot.unusedAbilityPoints(), "skillValues", snapshot.skillValues());
+    }
+
+    private static Map<String, Object> skillSummary(
+        WynnSemanticUiService.Snapshot snapshot, WynnSemanticUiService.Skill skill
+    ) {
+        return linked("screenClass", snapshot.screenClass(), "screenTitle", snapshot.title(),
+            "menuClass", snapshot.menuClass(), "syncId", snapshot.syncId(), "stateId", snapshot.stateId(),
+            "stateRevision", snapshot.stateRevision(), "characterInfoRecognized", snapshot.characterInfoRecognized(),
+            "skill", skill.displayName(), "skillValue", snapshot.skillValues().get(skill.displayName()),
+            "unassignedSkillPoints", snapshot.unassignedSkillPoints());
+    }
+
+    private UiActionService.GuiSnapshot lastObservedBankPageState(
+        String expectedScreen, UiActionService.GuiSnapshot fallback
+    ) {
+        try {
+            return onClientThreadOnce(() -> BankWithdrawService.capture(Minecraft.getInstance(), expectedScreen));
+        } catch (Exception ignored) {
+            return fallback;
+        }
+    }
+
+    private static Map<String, Object> bankPageSummary(UiActionService.GuiSnapshot snapshot) {
+        var page = BankWithdrawService.recognizeBankPage(snapshot);
+        return linked("screenClass", snapshot.screenClass(), "menuClass", snapshot.menuClass(),
+            "syncId", snapshot.syncId(), "stateId", snapshot.stateId(), "stateRevision", snapshot.stateRevision(),
+            "bankRecognized", page.recognized(), "currentPage", page.currentPage(),
+            "pageCount", page.pageCount(), "reason", page.reason());
     }
 
     private UiActionService.GuiSnapshot lastObservedBankState(
@@ -1305,11 +2051,19 @@ public final class McpEndpoint {
                 case "wynn_search_wiki" -> "Search Wynncraft Wiki";
                 case "wynn_get_wiki_page" -> "Get Wynncraft Wiki Page";
                 case "wynn_index_status" -> "Get Wynncraft Index Status";
+                case "wynn_get_official_ability_tree" -> "Get Official Wynncraft Ability Tree";
+                case "wynn_get_class_info" -> "Get Official Wynncraft Class Info";
+                case "wynn_get_player_abilities" -> "Get Official Player Abilities";
+                case "wynn_get_skill_points" -> "Get Wynncraft Skill Points";
                 case "minecraft_send_command" -> "Send Minecraft Command";
                 case "minecraft_send_chat" -> "Send Minecraft Chat";
                 case "minecraft_click_gui_slot" -> "Click Player Inventory Slot";
                 case "minecraft_move_inventory_item" -> "Move Player Inventory Item";
                 case "wynn_get_ability_tree" -> "Inspect Ability Tree Screen Evidence";
+                case "wynn_open_character_info" -> "Open Character Info";
+                case "wynn_assign_skill_points" -> "Assign Wynncraft Skill Points";
+                case "wynn_open_ability_tree" -> "Open Wynncraft Ability Tree";
+                case "wynn_open_bank_page" -> "Open Wynncraft Bank Page";
                 default -> name;
             },
             "description", description,

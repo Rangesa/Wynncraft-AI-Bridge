@@ -1,8 +1,8 @@
-# Wynn AI Bridge 0.6.1 — Minecraft 26.2 / Fabric / MCP + Wynncraft Knowledge Index
+# Wynn AI Bridge 0.8.0 — Minecraft 26.2 / Fabric / MCP + Wynncraft Knowledge Index
 
 Minecraft/Wynncraft の状態を **画像OCRではなくクライアント内部のテキストと状態から** AIへ渡すクライアントModです。Wynncraftの会話やtooltip、Ability Treeの表示を日本語化する機能も備えています。
 
-v0.6.1 は、v0.6.0の読み取り機能と限定UI操作を維持し、認識済みBank Page 2から空のplayer inventory slotへ単一アイテムをwithdrawする操作を追加した版です。Bank操作にはMinecraft内で件数を明示したlocal armが必要です。Wynncraft独自glyphや数値を保護し、通常のplayer chatは既定でAIへ渡しません。UI操作は既定で無効です。
+v0.8.0 は、0.7.0のread/auth/network境界を保ち、1nodeずつのsemantic Ability選択、count-1 Bank deposit、Mod Menu設定画面を追加します。Refund/resetはread-only診断に留め、ゲーム側のconfirmation・cost・server挙動を実機確認できるまでwrite toolを公開しません。
 
 これにより、AIは「今見えているアイテム」を読むだけでなく、**そのアイテムの公式データ、セット、場所、入手/使い道/強化/商人/クエスト情報を自分で索引・検索**できます。
 
@@ -222,7 +222,7 @@ http://127.0.0.1:8765/mcp
 {
   "ok": true,
   "name": "wynn-ai-bridge",
-  "version": "0.6.1",
+  "version": "0.8.0",
   "mcp": {
     "path": "/mcp",
     "protocols": ["2026-07-28", "2025-11-25"]
@@ -242,22 +242,49 @@ http://127.0.0.1:8765/mcp
 
 ## MCP tools
 
-`allowActions=false` の既定設定では、読み取り専用toolを15個公開します。
+`allowActions=false` の既定設定では、読み取り専用toolを19個公開します。既存15 toolsは名前・schema・挙動を維持し、公式Wynncraft read 3個と `wynn_get_skill_points` を追加します。
 
 - Minecraft: `minecraft_get_state`, `minecraft_get_recent_text`, `minecraft_get_slot_tooltip`, `minecraft_get_context`, `minecraft_get_open_container`, `minecraft_get_inventory`, `minecraft_get_visible_ui`
-- Wynncraft knowledge: `wynn_inspect_hovered_item`, `wynn_knowledge_search`, `wynn_search_items`, `wynn_get_item`, `wynn_search_locations`, `wynn_search_wiki`, `wynn_get_wiki_page`, `wynn_index_status`
+- Wynncraft knowledge: `wynn_inspect_hovered_item`, `wynn_knowledge_search`, `wynn_search_items`, `wynn_get_item`, `wynn_search_locations`, `wynn_search_wiki`, `wynn_get_wiki_page`, `wynn_index_status`, `wynn_get_official_ability_tree`, `wynn_get_class_info`, `wynn_get_player_abilities`, `wynn_get_skill_points`
 
 `allowActions=true` にすると、認証付きの `minecraft_send_command` と `minecraft_send_chat` も追加されます。
 
-`allowUiActions=false` が既定値です。`allowUiActions=true` にすると、読み取り専用のruntime診断tool 1個と、別の安全ゲートを使うwrite tool 4個が追加され、tools/listは合計20個になります。`allowActions`、Bearer token、command/chatの認証条件は変更しません。
+`allowUiActions=false` が既定値です。tools/listは既定20個（Minecraft client read 7個 + Wynncraft/semantic read 13個）で、Ability Tree runtime診断もread-onlyとして常に利用できます。tools/list生成ロジック上のtool数は次のとおりです。
+
+| allowUiActions | allowActions | tools/list |
+|---|---:|---:|
+| false | false | 20 |
+| true | false | 30 |
+| false | true | 22 |
+| true | true | 32 |
+
+`allowActions`、Bearer token、command/chatの認証条件は変更しません。UI write toolはすべてlocal category armも必要です。
 
 - `minecraft_click_gui_slot`: fresh readのscreen class / syncId / stateRevision / item名が一致した場合だけ、自分のバニラinventory画面にあるitem slotを1回クリック
 - `minecraft_move_inventory_item`: 自分のmain inventory/hotbar間でstack全体を移動。移動先は空、または同じitem/componentsでstack全体が収まる場合だけ許可
-- `minecraft_withdraw_bank_item`: 認識済みWynncraft Bank Page 2のcontent slot 0–44から、count 1のアイテムを空のplayer inventory slotへ1個withdraw。Page 2のscreen/menu/syncId/revisionとBankのページ操作ラベルを実行直前に照合し、サーバー同期後に両slotを検証。1回のlocal armで最大7回まで
+- `minecraft_withdraw_bank_item`: 認識できた現在のBank pageのcontent slot 0–44から、count 1のアイテムを空のplayer inventory slotへ1個withdraw。page/screen/menu/syncId/revision/itemを実行直前に照合し、サーバー同期後に両slotを検証
+- `wynn_deposit_bank_item`: 現在認識できるBank pageへplayer inventoryからcount 1のitemを1個deposit。空きBank slotはBridgeが選び、stack移動やshift-clickは行わない
+- `wynn_open_bank_page`: 意味上のpage番号を受け取り、認識したBank navigation controlで隣の1ページだけ移動。遠いページは最新read/revisionを取り直して繰り返す
 - `minecraft_equip_item`: `helmet` / `chestplate` / `leggings` / `boots` の空いているvanilla装備slotへ、Minecraftの`Equippable` componentが一致するitemを移動。装備済みitemの置換とWynncraft独自のアクセサリ/装備GUIは対象外
-- `wynn_get_ability_tree`: 現在のscreen、container、描画ItemStack、捕捉済みテキストを推測なしで返すruntime調査tool。Ability Treeのnode状態やpoint数は判別せず、クリックもしません
+- `wynn_open_character_info`: インベントリ内で一意に認識したCharacter Info compassを使う。外部引数にslotはなく、現在選択中hotbarにitemがある場合だけ実行
+- `wynn_assign_skill_points`: skill名とpoint数を指定。Character Info画面、残数、現在値、button tooltipを一意に認識できた場合だけ各pointを1回ずつクリックし、server sync後にskill増加と残数減少を検証
+- `wynn_open_ability_tree`: Character Info内でitem name/tooltipから一意に見つかったAbility Tree controlだけをクリックし、画面遷移を確認
+- `wynn_get_ability_tree`: 公式node/archetypeを、実機item identity、slot、tooltip、rendered evidenceと照合。各nodeにmatch confidenceを返し、曖昧なnodeは`UNKNOWN`のまま返す。refund/resetに関係する表示文言も推測なしでread-only取得
+- `wynn_select_ability`: `abilityId`と`classId`で一つのnodeだけ選択。ability arm必須。official tree、class、page、revision、node item identity、AP、NODE/ARCHETYPE/locksをpreflightし、クリックは1回だけ。AP消費・SELECTED状態・GUI revisionをserver同期後に検証
 
-この実装は、任意のHandledScreenへの汎用write APIを公開しません。Bank withdrawは、`ContainerScreen` + `ChestMenu` + 90 slotsに加えて、`Quick Actions` / `Storage Type` / `Page 1 <<<<<` / `Page 3 >>>>>` が既知slotにあるPage 2だけを認識します。Bank content slot 0–44からcount 1の1アイテムを、空のplayer inventory slotへ標準pickup click 2回で移動し、Bankの他ページ、deposit、merchant、trade、bulk stack、shift-clickは拒否します。通常のslot clickとinventory moveは引き続き自分のvanilla inventoryに限定します。drop / throw / destroy / sell / buy / trade確定 / arbitrary inputは公開しません。
+任意のHandledScreenやpixel座標へのwrite APIは公開しません。Bank認識は`ContainerScreen` + `ChestMenu` + 90-slot構造、container/player slot ownership、`Quick Actions` / `Storage Type`、prev/next page control、captured page textを組み合わせます。Page 1、途中ページ、最終ページはそれぞれ実際に見えているnavigationから判定します。`pageCount`は明示テキストがある場合だけ返します。withdraw/depositはcount 1・1 slotだけで、shift-clickやbulk stackは対象外です。drop / throw / destroy / sell / buy / trade確定 / arbitrary inputは公開しません。
+
+Character Infoの実機画面やAbility Tree item identityが未取得の場合、buttonやnodeが完全に一致する読み取り根拠を持たない操作は拒否します。`wynn_select_ability`は呼び出しごとに1nodeだけ処理します。refund/resetの操作方法・cost・confirmation・server挙動はread-only diagnosticで生の表示証拠を収集します。公式Wikiは、tree menuを閉じる前なら直近でunlockしたnodeをright-clickでundoでき、treeを閉じた後の編集/resetには3 Ability ShardsとReset your Tree画面が必要と説明しています（[Ability Tree](https://wynncraft.wiki.gg/wiki/Ability_Tree)）。ただし0.8.0では対象画面・button/node identity・server結果をこのクライアントで実機検証できていないため、refund/reset write toolは公開しません。
+
+### 公式Ability Tree data
+
+外部知識MCP [mpeciakk/wynncraft-mcp](https://github.com/mpeciakk/wynncraft-mcp) のAPI設計を参考にし、コード依存やコードコピーはしていません。Bridgeは認証不要のWynncraft public APIから次を読みます。
+
+- `GET https://api.wynncraft.com/v3/ability/tree/{class}` — official tree, node ids/names, pages, slots, coordinates, requirements, links, locks, archetypes, icons
+- `GET https://api.wynncraft.com/v3/classes/{class}` — class metadata
+- `GET https://api.wynncraft.com/v3/player/{username}/characters/{characterUuid}/abilities` — public character's unlocked nodes
+
+Static tree/class data is cached for 24 hours under `config/wynn-ai-bridge-cache/official-ability/`. If the API is unavailable, an existing cache can still be read and marked stale. API failure never blocks client-local Minecraft read tools. Player abilities responses use a short 30-second in-memory cache to avoid repeating the public request.
 
 ### `minecraft_get_context`
 
@@ -368,13 +395,22 @@ MCPからarmするtoolはありません。UI操作を有効にするには、�
 
 ```text
 /wynnbridge actions arm
+/wynnbridge actions arm inventory 10
 /wynnbridge actions arm bank 7
+/wynnbridge actions arm skills 5
+/wynnbridge actions arm ability 3
 /wynnbridge actions disarm
 ```
 
-起動時は必ずdisarmedです。通常の`arm`は最大 `uiActions.maxArmSeconds` 秒（既定300秒）UI操作を許可しますが、Bank withdraw allowanceは0です。Bankからの取り出しを使う場合だけ、Minecraft内で`arm bank <1-7>`を実行して許可件数を明示します。各成功または試行で1枠を消費し、最大7個まで、1 actionにつきcount 1のアイテム1個です。この枠はメモリ上だけに保持し、disarm、timeout、disconnect、world changeで消去します。操作は1件ずつ処理し、各actionの開始間隔は750ms以上、同じJSON-RPC request idは再利用できません。操作前に画面・syncId・revision・slot内容を再取得し、サーバー同期後に両slotを確認します。確認できない場合は`verified=false`を返し、成功扱いにしません。
+起動時は必ずdisarmedです。引数なしの`arm`はInventoryカテゴリを1 actionだけ許可します。カテゴリ上限はinventory 10、bank 7、skills 5、ability 3です。実行時は一致するカテゴリをarmし、requested skill point数はその数だけskills quotaを消費します。通常UI actionは最初のinteraction前にquotaを予約します。Ability selectionはpreflight拒否ではquotaを消費せず、クリック直前に1 node分を消費します。クリック後の結果不明でもquotaは戻りません。arm状態と件数はメモリ上だけに保持し、disarm、timeout、disconnect、world changeで消去します。操作は同時に1件、MCP action間は750ms以上、同じJSON-RPC request idは再利用できません。毎回client threadでscreen/syncId/revision/itemを再取得し、server同期後に期待状態を確認します。確認できない場合は`verified=false`を返し、成功扱いにしません。
 
 公開MCPが認証なしでも、disarmed状態でのwrite callは `UI actions are not locally armed` で拒否します。`allowActions=true` とtokenが設定されている場合は、従来どおり `/mcp` 全体にBearer認証が必要です。
+
+### Mod Menu settings
+
+Mod Menu 20.0.2以降が別途インストールされていれば、Wynn AI Bridgeの設定画面にversion、Bridge状態、bind/port、MCP tool数、action settings、現在のarm category/残り件数、Wynncraft API cache診断が表示されます。diagnostic summaryのclipboardコピーと公式tree/class cache削除もできます。
+
+設定画面は直接armしません。`allowUiActions`をfalseにするとlocal armとallowanceを即時消去します。最大arm秒数は30–300秒です。Mod Menu APIのcompile-only signatureはMod JARに含めません。
 
 ## ChatGPTへつなぐ: Tailscale Funnel
 
@@ -387,7 +423,7 @@ ChatGPT
   -> http://127.0.0.1:<BRIDGE_PORT>/mcp
 ```
 
-現在のproduction path（2026-09-29時点）は次のとおりです。
+現在のproduction path（2026-09-30時点）は次のとおりです。
 
 ```text
 ChatGPT
@@ -406,6 +442,8 @@ Tailscaleの `--set-path=/mcp` はmount prefixをproxy時に取り除くため�
 ### Direct Windows Funnelのセットアップ例
 
 以下はWindowsでBridgeへ直接forwardする構成例です。上記の現行WSL production pathには適用しません。
+
+現行のChatGPT接続URLは `https://wynn-bridge.tail0243b7.ts.net/mcp` です。relay、portproxy、Funnelは運用環境の設定であり、このModは変更しません。`172.18.96.1`などのhost-side IPは環境固有なのでソースに固定しません。
 
 1. Tailscale Windows clientを起動し、ChromeのTailscale管理画面と同じ、使用するtailnetのアカウントにサインインします。Windows serviceはPC起動時に自動起動します。
 2. [Tailscale Admin Console](https://login.tailscale.com/admin) のDNS設定でMagicDNSとHTTPS certificatesが有効であることを確認します。Funnelの初回有効化では、TailscaleがHTTPS certificateを用意しtailnet policyへFunnel node attributeを追加します。既定の対象は `autogroup:member`（tailnet内の全member）なので、policyの対象範囲を確認してから承認してください。
@@ -542,12 +580,12 @@ Minecraft 26.2の開発環境はJava 25です。
 gradle build
 ```
 
-`build` は `check` を実行し、既存Ability Tree regressionとUI action security regressionも含みます。生成されたJARを使用するFabric 26.2 profileの `mods` フォルダへ配置してください。
+`build` は `check` を実行し、Ability TreeとUI action security regressionも含みます。Minecraft稼働中は使用中JARを置換せず、必要なら別名 `.jar.pending` として配置してください。
 
 生成物:
 
 ```text
-build/libs/wynn-ai-bridge-0.6.1.jar
+build/libs/wynn-ai-bridge-0.8.0.jar
 ```
 
 JARのversionは `gradle.properties` の `mod_version` から決まります。

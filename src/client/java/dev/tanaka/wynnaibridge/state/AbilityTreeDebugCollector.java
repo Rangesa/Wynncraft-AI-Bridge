@@ -7,6 +7,8 @@ import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
 import dev.tanaka.wynnaibridge.state.TooltipCollector;
 
 import java.util.List;
+import java.util.ArrayList;
+import java.util.Locale;
 
 /** Read-only runtime evidence collector; it deliberately does not infer ability states or click targets. */
 public final class AbilityTreeDebugCollector {
@@ -26,6 +28,23 @@ public final class AbilityTreeDebugCollector {
         List<TextCaptureStore.CapturedText> visibleText = TextCaptureStore.INSTANCE.snapshotSince(
             0L, maxAgeMs, null, textLimit, false
         );
+        List<RefundEvidence> refundEvidence = new ArrayList<>();
+        for (TextCaptureStore.CapturedText line : visibleText) {
+            if (refundRelated(line.text())) refundEvidence.add(new RefundEvidence(line.source(), null, line.text()));
+        }
+        if (container != null) {
+            for (OpenContainerCollector.SlotView slot : container.slots()) {
+                if (slot.item() == null) continue;
+                for (ItemInspector.TooltipLine line : slot.item().tooltip()) {
+                    if (refundRelated(line.text())) refundEvidence.add(new RefundEvidence("container-tooltip", slot.menuSlot(), line.text()));
+                }
+            }
+        }
+        for (RenderedItemCaptureStore.RenderedItemView rendered : renderedItems) {
+            for (ItemInspector.TooltipLine line : rendered.item().tooltip()) {
+                if (refundRelated(line.text())) refundEvidence.add(new RefundEvidence("rendered-tooltip", null, line.text()));
+            }
+        }
         return new Result(
             System.currentTimeMillis(),
             revision,
@@ -40,9 +59,16 @@ public final class AbilityTreeDebugCollector {
             hoveredItem,
             renderedItems,
             visibleText,
+            List.copyOf(refundEvidence),
             "unclassified",
-            "Ability Tree semantics are not inferred until this runtime screen has been inspected."
+            "Refund/reset evidence is an exact read-only capture only; visibility does not establish cost or execution semantics."
         );
+    }
+
+    private static boolean refundRelated(String value) {
+        String text = value == null ? "" : value.toLowerCase(Locale.ROOT);
+        return text.contains("refund") || text.contains("reset") || text.contains("ability shard")
+            || text.contains("undo") || text.contains("confirm");
     }
 
     public record Result(
@@ -57,7 +83,10 @@ public final class AbilityTreeDebugCollector {
         TooltipCollector.Result hoveredItem,
         List<RenderedItemCaptureStore.RenderedItemView> renderedItems,
         List<TextCaptureStore.CapturedText> visibleText,
+        List<RefundEvidence> refundResetEvidence,
         String abilityTreeClassification,
         String classificationNote
     ) {}
+
+    public record RefundEvidence(String source, Integer menuSlot, String exactText) {}
 }

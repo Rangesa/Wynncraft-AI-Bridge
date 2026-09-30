@@ -10,6 +10,9 @@ import net.minecraft.world.item.TooltipFlag;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 
 /**
  * Converts an ItemStack into a JSON-friendly view made only from information
@@ -45,8 +48,19 @@ public final class ItemInspector {
             name.getString(),
             FormattedTextUtil.firstColorHex(name),
             stack.getCount(),
-            tooltip
+            tooltip,
+            componentsHash(stack)
         );
+    }
+
+    private static String componentsHash(ItemStack stack) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                .digest(stack.getComponents().toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(digest);
+        } catch (NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException("SHA-256 is not available", impossible);
+        }
     }
 
     public record TooltipLine(String text, String color) {}
@@ -56,6 +70,7 @@ public final class ItemInspector {
         String name,
         String nameColor,
         int count,
-        List<TooltipLine> tooltip
+        List<TooltipLine> tooltip,
+        String componentsHash
     ) {}
 }

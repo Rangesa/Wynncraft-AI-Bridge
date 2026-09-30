@@ -56,6 +56,10 @@ public final class BridgeHttpServer implements AutoCloseable {
                 Map.entry("uiActionsEnabled", config.allowUiActions()),
                 Map.entry("uiActionsArmed", config.allowUiActions() && uiStatus.armed()),
                 Map.entry("uiActionsArmExpiresAt", config.allowUiActions() ? uiStatus.expiresAtEpochMillis() : 0L),
+                Map.entry("uiActionsArmCategory", config.allowUiActions() && uiStatus.armed() && uiStatus.category() != null
+                    ? uiStatus.category().commandName() : ""),
+                Map.entry("uiActionsCategoryActionsRemaining", config.allowUiActions() && uiStatus.armed()
+                    ? uiStatus.categoryActionsRemaining() : 0),
                 Map.entry("uiActionsBankWithdrawalsRemaining", config.allowUiActions() && uiStatus.armed()
                     ? uiStatus.bankWithdrawalsRemaining() : 0),
                 Map.entry("mcp", Map.of(

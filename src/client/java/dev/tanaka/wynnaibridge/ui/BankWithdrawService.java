@@ -1,6 +1,7 @@
 package dev.tanaka.wynnaibridge.ui;
 
 import dev.tanaka.wynnaibridge.state.UiStateRevisionTracker;
+import dev.tanaka.wynnaibridge.capture.TextCaptureStore;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.inventory.ContainerScreen;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -12,9 +13,10 @@ import net.minecraft.world.item.ItemStack;
 import java.util.ArrayList;
 import java.util.List;
 
-/** One single-count item may be withdrawn from the observed Wynncraft Bank page 2. */
+/** One single-count item may be withdrawn from any page identified as the Wynncraft Bank. */
 public final class BankWithdrawService {
-    public static final int BANK_PAGE = 2;
+    public static final int MIN_BANK_PAGE = 1;
+    public static final int MAX_BANK_PAGE = 100;
     private static final int BANK_CONTENT_SLOT_MIN = 0;
     private static final int BANK_CONTENT_SLOT_MAX = 44;
     private static final int BANK_QUICK_ACTIONS_SLOT = 46;
@@ -31,7 +33,7 @@ public final class BankWithdrawService {
         }
         var activeScreen = minecraft.gui.screen();
         if (activeScreen == null) {
-            throw new UiActionService.UiActionException("NO_GUI", "Open the Wynncraft Bank page 2 first");
+            throw new UiActionService.UiActionException("NO_GUI", "Open a recognized Wynncraft Bank page first");
         }
         String screenClass = activeScreen.getClass().getName();
         if (expectedScreen != null && !expectedScreen.equals(screenClass)) {
@@ -85,7 +87,7 @@ public final class BankWithdrawService {
         long expectedRevision
     ) {
         UiActionService.validateExpectedContext(before, expectedScreen, expectedSyncId, expectedRevision);
-        validateBankPage2(before, bankPage);
+        validateBankPage(before, bankPage);
         if (bankSlot < BANK_CONTENT_SLOT_MIN || bankSlot > BANK_CONTENT_SLOT_MAX) {
             throw new UiActionService.UiActionException("UNSAFE_BANK_SLOT", "Only Bank content slots 0 through 44 can be withdrawn");
         }
@@ -121,6 +123,61 @@ public final class BankWithdrawService {
         return new BankWithdrawPlan(before, source, destination, source.menuSlot(), destination.menuSlot(), bankPage);
     }
 
+    public static BankPageStepPlan planPageStep(
+        UiActionService.GuiSnapshot before,
+        int targetPage,
+        String expectedScreen,
+        int expectedSyncId,
+        long expectedRevision
+    ) {
+        UiActionService.validateExpectedContext(before, expectedScreen, expectedSyncId, expectedRevision);
+        BankPageRecognizer.PageInfo page = recognizeBankPage(before);
+        if (!page.recognized() || page.currentPage() == null) {
+            throw new UiActionService.UiActionException("UNRECOGNIZED_BANK", "The current screen is not a recognized Wynncraft Bank page");
+        }
+        if (Math.abs(targetPage - page.currentPage()) != 1) {
+            throw new UiActionService.UiActionException("PAGE_STEP_ONLY", "Open one adjacent Bank page per call and use a fresh read before continuing");
+        }
+        if (page.pageCount() != null && targetPage > page.pageCount()) {
+            throw new UiActionService.UiActionException("BANK_PAGE_OUT_OF_RANGE", "The target page exceeds the visible Bank page count");
+        }
+        int navigationSlot = targetPage > page.currentPage() ? BANK_NEXT_PAGE_SLOT : BANK_PREVIOUS_PAGE_SLOT;
+        String expectedLabel = targetPage > page.currentPage()
+            ? "Page " + targetPage + " >>>>>" : "Page " + targetPage + " <<<<<";
+        UiActionService.SlotSnapshot control = before.slots().get(navigationSlot);
+        if (!control.active() || !control.mayPickup() || control.item().empty()
+            || !expectedLabel.equals(control.item().name())) {
+            throw new UiActionService.UiActionException("BANK_NAVIGATION_NOT_AVAILABLE", "The expected Bank page control is not present and clickable");
+        }
+        return new BankPageStepPlan(before, page.currentPage(), targetPage, navigationSlot);
+    }
+
+    public static UiActionService.GuiSnapshot startPageStep(Minecraft minecraft, BankPageStepPlan plan) {
+        UiActionService.GuiSnapshot current = capture(minecraft, plan.before().screenClass());
+        if (current.screenIdentity() != plan.before().screenIdentity()
+            || current.syncId() != plan.before().syncId()
+            || current.stateRevision() != plan.before().stateRevision()
+            || !recognizedBankPage(current, plan.currentPage())) {
+            throw new UiActionService.UiActionException("STATE_CHANGED", "STATE_CHANGED: Bank screen or page changed before navigation");
+        }
+        UiActionService.SlotSnapshot control = current.slots().get(plan.navigationSlot());
+        String expectedLabel = plan.targetPage() > plan.currentPage()
+            ? "Page " + plan.targetPage() + " >>>>>" : "Page " + plan.targetPage() + " <<<<<";
+        if (!control.active() || !control.mayPickup() || control.item().empty()
+            || !expectedLabel.equals(control.item().name())) {
+            throw new UiActionService.UiActionException("STATE_CHANGED", "STATE_CHANGED: the Bank page control changed before navigation");
+        }
+        performPickup(minecraft, current, plan.navigationSlot());
+        return capture(minecraft, plan.before().screenClass());
+    }
+
+    public static boolean pageStepMatches(UiActionService.GuiSnapshot after, BankPageStepPlan plan) {
+        return after.screenIdentity() == plan.before().screenIdentity()
+            && after.syncId() == plan.before().syncId()
+            && after.stateId() != plan.before().stateId()
+            && recognizedBankPage(after, plan.targetPage());
+    }
+
     /** Revalidates the plan immediately before the first standard pickup interaction. */
     public static BankWithdrawStart start(Minecraft minecraft, BankWithdrawPlan plan) {
         UiActionService.GuiSnapshot current = capture(minecraft, plan.before().screenClass());
@@ -133,7 +190,6 @@ public final class BankWithdrawService {
         if (!destination.mayPlace(sourceStack)) {
             throw new UiActionService.UiActionException("DESTINATION_NOT_ALLOWED", "The selected player inventory slot cannot accept this item");
         }
-        UiActionGate.INSTANCE.consumeBankWithdrawalAllowance();
         performPickup(minecraft, current, plan.bankMenuSlot());
         return new BankWithdrawStart(plan, capture(minecraft, plan.before().screenClass()));
     }
@@ -154,7 +210,7 @@ public final class BankWithdrawService {
     }
 
     public static boolean sourcePickupMatches(UiActionService.GuiSnapshot current, BankWithdrawPlan plan) {
-        if (!sameScreen(current, plan.before()) || !recognizedPage2(current)) return false;
+        if (!sameScreen(current, plan.before()) || !recognizedBankPage(current, plan.bankPage())) return false;
         UiActionService.SlotSnapshot source = current.slots().get(plan.bankMenuSlot());
         UiActionService.SlotSnapshot destination = current.slots().get(plan.inventoryMenuSlot());
         return source.item().empty()
@@ -163,7 +219,7 @@ public final class BankWithdrawService {
     }
 
     public static boolean withdrawResultMatches(UiActionService.GuiSnapshot current, BankWithdrawPlan plan) {
-        if (!sameScreen(current, plan.before()) || !recognizedPage2(current)) return false;
+        if (!sameScreen(current, plan.before()) || !recognizedBankPage(current, plan.bankPage())) return false;
         UiActionService.SlotSnapshot source = current.slots().get(plan.bankMenuSlot());
         UiActionService.SlotSnapshot destination = current.slots().get(plan.inventoryMenuSlot());
         return source.item().empty()
@@ -172,20 +228,36 @@ public final class BankWithdrawService {
     }
 
     public static boolean recognizedPage2(UiActionService.GuiSnapshot snapshot) {
-        return snapshot.screenClass().equals(ContainerScreen.class.getName())
-            && snapshot.menuClass().equals(ChestMenu.class.getName())
-            && snapshot.syncId() > 0
-            && snapshot.slots().size() == BANK_MENU_SLOT_COUNT
-            && "Quick Actions".equals(itemName(snapshot, BANK_QUICK_ACTIONS_SLOT))
-            && "Storage Type".equals(itemName(snapshot, BANK_STORAGE_TYPE_SLOT))
-            && "Page 1 <<<<<".equals(itemName(snapshot, BANK_PREVIOUS_PAGE_SLOT))
-            && "Page 3 >>>>>".equals(itemName(snapshot, BANK_NEXT_PAGE_SLOT));
+        return recognizedBankPage(snapshot, 2);
     }
 
     public static void validateBankPage2(UiActionService.GuiSnapshot snapshot, int bankPage) {
-        if (bankPage != BANK_PAGE || !recognizedPage2(snapshot)) {
+        validateBankPage(snapshot, bankPage);
+    }
+
+    public static BankPageRecognizer.PageInfo recognizeBankPage(UiActionService.GuiSnapshot snapshot) {
+        List<BankPageRecognizer.SlotEvidence> evidence = snapshot.slots().stream().map(slot ->
+            new BankPageRecognizer.SlotEvidence(slot.menuSlot(), slot.inventorySlot() >= 0
+                ? "PLAYER_INVENTORY" : "OPEN_CONTAINER", slot.item().empty() ? null : slot.item().name(), List.of())
+        ).toList();
+        List<String> captured = TextCaptureStore.INSTANCE.snapshotSince(0L, 1_500L, null, 1000, false).stream()
+            .filter(text -> text.source().startsWith("gui.") || text.source().startsWith("tooltip"))
+            .map(TextCaptureStore.CapturedText::text).toList();
+        return BankPageRecognizer.recognize(snapshot.screenClass(), snapshot.menuClass(), snapshot.title(),
+            snapshot.syncId(), snapshot.slots().size(), evidence, captured);
+    }
+
+    public static boolean recognizedBankPage(UiActionService.GuiSnapshot snapshot, int expectedPage) {
+        BankPageRecognizer.PageInfo page = recognizeBankPage(snapshot);
+        return page.recognized() && page.currentPage() != null && page.currentPage() == expectedPage;
+    }
+
+    public static void validateBankPage(UiActionService.GuiSnapshot snapshot, int expectedPage) {
+        BankPageRecognizer.PageInfo page = recognizeBankPage(snapshot);
+        if (expectedPage < MIN_BANK_PAGE || expectedPage > MAX_BANK_PAGE
+            || !page.recognized() || page.currentPage() == null || page.currentPage() != expectedPage) {
             throw new UiActionService.UiActionException("UNRECOGNIZED_BANK_PAGE",
-                "The current screen is not the recognized Wynncraft Bank page 2");
+                "The current screen or page does not match the requested recognized Wynncraft Bank page");
         }
     }
 
@@ -199,7 +271,7 @@ public final class BankWithdrawService {
 
     private static boolean sameInitialState(UiActionService.GuiSnapshot current, BankWithdrawPlan plan) {
         if (!sameScreen(current, plan.before()) || current.stateRevision() != plan.before().stateRevision()
-            || !recognizedPage2(current) || !current.carriedItem().empty()) return false;
+            || !recognizedBankPage(current, plan.bankPage()) || !current.carriedItem().empty()) return false;
         return sameStack(current.slots().get(plan.bankMenuSlot()).item(), plan.source().item())
             && sameStack(current.slots().get(plan.inventoryMenuSlot()).item(), plan.destination().item());
     }
@@ -214,12 +286,6 @@ public final class BankWithdrawService {
             }
         }
         throw new UiActionService.UiActionException("UNSAFE_SLOT", "The requested player inventory slot is not present in the Bank screen");
-    }
-
-    private static String itemName(UiActionService.GuiSnapshot snapshot, int menuSlot) {
-        if (menuSlot < 0 || menuSlot >= snapshot.slots().size()) return null;
-        UiActionService.ItemSnapshot item = snapshot.slots().get(menuSlot).item();
-        return item.empty() ? null : item.name();
     }
 
     private static boolean sameScreen(UiActionService.GuiSnapshot left, UiActionService.GuiSnapshot right) {
@@ -272,6 +338,7 @@ public final class BankWithdrawService {
     ) {}
 
     public record BankWithdrawStart(BankWithdrawPlan plan, UiActionService.GuiSnapshot afterSourcePickup) {}
+    public record BankPageStepPlan(UiActionService.GuiSnapshot before, int currentPage, int targetPage, int navigationSlot) {}
     public record ItemView(String itemId, String name, int count) {}
     public record BankState(String screenClass, int syncId, int stateId, long stateRevision,
                             int bankPage, int bankSlot, int inventorySlot,

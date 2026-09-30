@@ -1,7 +1,9 @@
 package dev.tanaka.wynnaibridge.state;
 
 import dev.tanaka.wynnaibridge.capture.FormattedTextUtil;
+import dev.tanaka.wynnaibridge.capture.TextCaptureStore;
 import dev.tanaka.wynnaibridge.mixin.AbstractContainerScreenAccessor;
+import dev.tanaka.wynnaibridge.ui.BankPageRecognizer;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
 import net.minecraft.network.chat.Component;
@@ -35,24 +37,38 @@ public final class OpenContainerCollector {
         int hoveredMenuSlot = hovered == null ? -1 : menu.slots.indexOf(hovered);
 
         List<SlotView> slots = new ArrayList<>();
+        List<SlotView> allSlots = new ArrayList<>(menu.slots.size());
         int nonEmpty = 0;
         for (int i = 0; i < menu.slots.size(); i++) {
             Slot slot = menu.slots.get(i);
             ItemStack stack = slot.getItem();
             boolean empty = stack.isEmpty();
             if (!empty) nonEmpty++;
-            if (empty && !includeEmpty) continue;
-
             String section = slot.container == minecraft.player.getInventory() ? "PLAYER_INVENTORY" : "OPEN_CONTAINER";
-            slots.add(new SlotView(
+            SlotView view = new SlotView(
                 i,
                 slot.getContainerSlot(),
                 section,
                 i == hoveredMenuSlot,
                 slot.isActive(),
                 empty ? null : ItemInspector.inspect(minecraft, stack, includeTooltips, advanced)
-            ));
+            );
+            allSlots.add(view);
+            if (!empty || includeEmpty) slots.add(view);
         }
+
+        List<String> capturedGuiText = TextCaptureStore.INSTANCE.snapshotSince(
+                0L, 1_500L, null, 1000, false).stream()
+            .filter(text -> text.source().startsWith("gui.") || text.source().startsWith("tooltip"))
+            .map(TextCaptureStore.CapturedText::text)
+            .toList();
+        BankPageRecognizer.PageInfo bank = BankPageRecognizer.recognize(
+            screen.getClass().getName(), menu.getClass().getName(), title.getString(), menu.containerId,
+            menu.slots.size(), allSlots.stream().map(slot -> new BankPageRecognizer.SlotEvidence(
+                slot.menuSlot(), slot.section(), slot.item() == null ? null : slot.item().name(),
+                slot.item() == null ? List.of() : slot.item().tooltip().stream().map(ItemInspector.TooltipLine::text).toList()
+            )).toList(), capturedGuiText
+        );
 
         ItemStack carried = menu.getCarried();
         return new Result(
@@ -71,7 +87,11 @@ public final class OpenContainerCollector {
             nonEmpty,
             hoveredMenuSlot >= 0 ? hoveredMenuSlot : null,
             carried == null || carried.isEmpty() ? null : ItemInspector.inspect(minecraft, carried, includeTooltips, advanced),
-            List.copyOf(slots)
+            List.copyOf(slots),
+            bank.recognized(),
+            bank.currentPage(),
+            bank.pageCount(),
+            bank.reason()
         );
     }
 
@@ -100,11 +120,15 @@ public final class OpenContainerCollector {
         Integer nonEmptySlots,
         Integer hoveredMenuSlot,
         ItemInspector.ItemView carriedItem,
-        List<SlotView> slots
+        List<SlotView> slots,
+        boolean bankRecognized,
+        Integer currentPage,
+        Integer pageCount,
+        String bankRecognitionReason
     ) {
         static Result error(String error) {
             return new Result(false, error, System.currentTimeMillis(), "", "", null, null,
-                0L, 0L, "", null, null, null, null, null, List.of());
+                0L, 0L, "", null, null, null, null, null, List.of(), false, null, null, error);
         }
     }
 }

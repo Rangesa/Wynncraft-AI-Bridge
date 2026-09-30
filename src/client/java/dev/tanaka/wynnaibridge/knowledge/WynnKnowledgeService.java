@@ -172,6 +172,24 @@ public final class WynnKnowledgeService implements AutoCloseable {
         );
     }
 
+    public synchronized void clearCache() throws IOException {
+        if (refreshRunning.get()) throw new IOException("Knowledge cache refresh is currently running");
+        Path directory = cacheDir;
+        if (directory != null && Files.isDirectory(directory)) {
+            Files.deleteIfExists(directory.resolve(ITEMS_CACHE));
+            Files.deleteIfExists(directory.resolve(SETS_CACHE));
+            Files.deleteIfExists(directory.resolve(MARKERS_CACHE));
+        }
+        items = List.of();
+        itemSets = Map.of();
+        markers = List.of();
+        itemsLoadedAt = 0L;
+        setsLoadedAt = 0L;
+        markersLoadedAt = 0L;
+        lastRefreshSuccessAt = 0L;
+        lastError = "";
+    }
+
     public ItemSearchResult searchItems(String query, String type, String subType, String tier, int limit) {
         String q = normalize(query);
         String typeFilter = normalize(type);
